@@ -65,3 +65,5 @@ assets/            全部素材（15 张插件用 GIF + 8 张静态 JPG 备用�
 plugin/host.js     Host 半边源码（粘进 cordis_define 的 code.host）
 plugin/client.js   Client 半边源码（粘进 cordis_define 的 code.client）
 ```
+喜欢就留个小小的star吧
+![taffy](assets/taffy-underwear.jpg)
