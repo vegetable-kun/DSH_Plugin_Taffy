@@ -1,6 +1,6 @@
 # taffy-mood — DeepSeek Harness 表情包状态机插件
 
-把 Taffy 表情包挂在 DeepSeek Harness Web UI 右下角，随 agent 状态自动切换：待审批、思考中、干活中、出错、被打断……全部有专属表情。
+这是一个dsh的插件，把 Taffy 表情包挂在 DeepSeek Harness Web UI 右下角，随 agent 状态自动切换：待审批、思考中、干活中、出错、被打断……全部有专属表情。
 
 ![taffy](assets/taffy-fork.gif)
 
@@ -65,5 +65,5 @@ assets/            全部素材（15 张插件用 GIF + 8 张静态 JPG 备用�
 plugin/host.js     Host 半边源码（粘进 cordis_define 的 code.host）
 plugin/client.js   Client 半边源码（粘进 cordis_define 的 code.client）
 ```
-喜欢就留个小小的star吧
+喜欢就留个小小的star吧😭
 ![taffy](assets/taffy-underwear.jpg)
