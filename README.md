@@ -64,6 +64,10 @@ test/smoke.mjs     冒烟测试：node test/smoke.mjs
 - 打字检测用官方 `conversation.composer.dock` InputZone 的 `props.input.draft`
 - 无构建步骤、无 npm 依赖：纯 ESM host + ModuleLoader 包装 client，clone 即源码即产物
 
+有问题欢迎投issue和pr,喜欢就点个免费的star吧
+
+<img width="300" height="300" alt="taffy-underwear" src="https://github.com/user-attachments/assets/3118f157-4fa5-44ba-889e-4e056bfa2ebf" />
+
 ## License
 
 MIT
