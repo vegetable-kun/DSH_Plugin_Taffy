@@ -1,0 +1,4 @@
+# dsh-taffy-mood bundle layer: mount the taffy mood plugin (host state machine + web client overlay).
+- insert:
+    - id: dsh-taffy-mood
+      name: dsh-taffy-mood
