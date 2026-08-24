@@ -1,0 +1,15 @@
+# awesome-dsh-plugin 注册表条目
+# 提交方式：把本文件内容复制为 data/plugins/vegetable-kun__DSH_Plugin_Taffy.yml
+# 提交到 https://github.com/awesome-dsh-plugin/awesome-dsh-plugin 的 PR 里。
+# 字段格式对照官方样例（whale-musume / liquid-glass）：
+#   url        仓库地址
+#   name       owner/repo（不是 npm 包名）
+#   category   官方分类词汇，桌宠/趣味类用 fun
+#   description.en/zh  一句话介绍，风格参考同类条目
+
+url: https://github.com/vegetable-kun/DSH_Plugin_Taffy
+name: vegetable-kun/DSH_Plugin_Taffy
+category: fun
+description:
+  en: 'A Taffy mood mascot for the DeepSeek Harness Web UI: the corner GIF reacts live to agent state — approval pending, approved, thinking, tool runs, interrupts, rejections and errors — with drag positioning, a middle-click console, per-mood locking and persisted appearance settings.'
+  zh: 'Taffy 表情包状态机：右下角表情实时联动 agent 状态——待审批、已批准、思考、工具执行、插话、被拒与出错各有专属表情；支持拖拽定位、中键控制台、表情锁定与外观设置持久化。'
