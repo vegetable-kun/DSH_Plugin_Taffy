@@ -66,6 +66,12 @@ window.__ModuleLoader__.load({
       begging: { label: '求饶' },
       admirable: { label: '得意' },
       fake_crying: { label: '假哭' },
+      waiting: { label: '等你回答' },
+      compacting: { label: '压缩记忆' },
+      tired: { label: '长任务疲惫' },
+      ignoredApproval: { label: '没人理' },
+      sleeping: { label: '休眠' },
+      greeting: { label: '打招呼' },
     }
 
     function loadSettings() {

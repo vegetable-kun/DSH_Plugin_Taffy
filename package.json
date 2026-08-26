@@ -1,6 +1,6 @@
 {
   "name": "dsh-taffy-mood",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Taffy 表情包状态机：右下角悬浮表情随 agent 状态切换（待审批/思考/工具/插话/出错/被拒…）。A Taffy mood state machine overlay for DeepSeek Harness.",
   "keywords": ["dsh", "dsh-plugin", "deepseek-harness", "taffy", "mascot", "emoji", "status"],
   "license": "MIT",

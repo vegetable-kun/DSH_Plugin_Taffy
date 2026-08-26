@@ -73,7 +73,7 @@ export async function apply(ctx) {
   const TIRED_AFTER_MS = 3 * 60 * 1000
   const IGNORED_AFTER_MS = 30 * 1000
   const SLEEP_AFTER_MS = 10 * 60 * 1000
-  const lockable = new Set(['idle', 'thinking', 'tool', 'hacker', 'celebrate', 'rejected', 'angry', 'suicide', 'surprised', 'crying', 'begging', 'admirable', 'fake_crying'])
+  const lockable = new Set(['idle', 'thinking', 'tool', 'hacker', 'celebrate', 'rejected', 'angry', 'suicide', 'surprised', 'crying', 'begging', 'admirable', 'fake_crying', 'waiting', 'compacting', 'tired', 'ignoredApproval', 'sleeping', 'greeting'])
 
   const sessionIdOf = (session) => {
     try { return session && session.id ? String(session.id) : null } catch { return null }

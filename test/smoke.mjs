@@ -98,6 +98,13 @@ async function call(url) {
   assert.equal(JSON.parse(bad.body).ok, false)
   const unlocked = JSON.parse((await call('/dsh-taffy-mood/api/action?action=lock')).body)
   assert.deepEqual(unlocked, { ok: true, locked: null })
+  // 新表情键也可锁定（控制台调试网格与 host 白名单同步）
+  for (const mood of ['waiting', 'compacting', 'tired', 'ignoredApproval', 'sleeping', 'greeting']) {
+    const r = JSON.parse((await call('/dsh-taffy-mood/api/action?action=lock&mood=' + mood)).body)
+    assert.equal(r.ok, true, '锁定 ' + mood + ' 应成功')
+    assert.equal(r.locked, mood)
+  }
+  await call('/dsh-taffy-mood/api/action?action=lock')
   const unknownAction = await call('/dsh-taffy-mood/api/action?action=nope')
   assert.equal(unknownAction.code, 404)
 }
