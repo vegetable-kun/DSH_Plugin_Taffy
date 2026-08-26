@@ -49,6 +49,7 @@ window.__ModuleLoader__.load({
       tired: ASSET_BASE + 'taffy-angry_staring.jpg',
       ignoredApproval: ASSET_BASE + 'taffy-cry_denying.gif',
       sleeping: ASSET_BASE + 'taffy4.jpg',
+      greeting: ASSET_BASE + 'tafei.jpg',
     }
 
     var LOCKMOODS = {
@@ -163,6 +164,9 @@ window.__ModuleLoader__.load({
             var hostStateTuple = React.useState(hostState0)
             var hostState = hostStateTuple[0]
             var setHostState = hostStateTuple[1]
+            // 开机问候：挂载时刻起 2 秒内显示打招呼图，纯客户端时间盒自动过期
+            var greetUntilTuple = React.useState(Date.now() + 2000)
+            var greetUntil = greetUntilTuple[0]
             var bumpTuple = React.useState(0)
             var bump = bumpTuple[1]
             var menuTuple = React.useState(null)
@@ -313,6 +317,10 @@ window.__ModuleLoader__.load({
             } else if (mood.typing) {
               src = GIFS.typing
               alt = '输入中'
+            } else if (now < greetUntil) {
+              // 开机问候：仅 2 秒时间盒，压过休眠/闲置但不遮蔽任何业务状态
+              src = GIFS.greeting
+              alt = '嗨，我在这儿！'
             } else if (hostState.sleeping) {
               // 空闲超 10 分钟：静态图休眠，省 GIF 解码；打字/任何活动即醒
               src = GIFS.sleeping
