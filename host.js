@@ -54,6 +54,14 @@ export async function apply(ctx) {
     admirableUntil: 0,
     consecutiveRejects: 0,
     turnToolCalls: 0,
+    // 等你回答：ask_user_question 挂起期间为 true；回答消息/结果配对/轮次结束三路清除
+    askPending: false,
+    askCallId: null,
+    // 求饶窗口：60 秒内第二次审批请求时置 5 秒时间盒，过期自动回落到 fork
+    lastAskedAt: 0,
+    beggingUntil: 0,
+    // 压缩记忆：compaction/start 置时间戳（含 90 秒兜底），end/summary/prune 归零
+    compactingUntil: 0,
   }
   const lockable = new Set(['idle', 'thinking', 'tool', 'hacker', 'celebrate', 'rejected', 'angry', 'suicide', 'surprised', 'crying', 'begging', 'admirable', 'fake_crying'])
 
@@ -84,13 +92,29 @@ export async function apply(ctx) {
     if (event.type === 'tool/call') {
       state.toolActive += 1
       state.turnToolCalls += 1
+      // 等你回答：ask_user_question 发出即挂起，直到回答消息/结果配对/轮次结束清除
+      if (event.data && event.data.name === 'ask_user_question') {
+        state.askCallId = event.data.callId || null
+        state.askPending = true
+      }
       return
     }
     if (event.type === 'tool/result') {
       state.toolActive = Math.max(0, state.toolActive - 1)
+      const tid = event.data && event.data.message && event.data.message.toolCallId
+      if (state.askPending && tid && state.askCallId === tid) {
+        state.askPending = false
+        state.askCallId = null
+      }
       return
     }
     if (event.type === 'user/message') {
+      // 回答到达：消费提问态，不算插话（否则每次答题都误报惊讶）。
+      if (state.askPending) {
+        state.askPending = false
+        state.askCallId = null
+        return
+      }
       // 插话判定：模型真的在输出/干活才算；新轮次刚启动两者皆为否，
       // 普通发消息不会误报。
       const busy = state.toolActive > 0 || Date.now() - state.lastChunkAt < 2500
@@ -100,6 +124,19 @@ export async function apply(ctx) {
     if (event.type === 'approval/asked') {
       state.approvalPending += 1
       if (sid) state.approvalSessionId = sid
+      const t = Date.now()
+      // 60 秒内第二次请求 → 5 秒求饶窗口；时间盒过期自动回落 fork，不会卡死。
+      if (t - state.lastAskedAt < 60000) state.beggingUntil = t + 5000
+      state.lastAskedAt = t
+      return
+    }
+    if (event.type === 'compaction/start') {
+      // 时间戳含 90 秒兜底：end 丢失也不会永久卡在压缩表情上。
+      state.compactingUntil = Date.now() + 90000
+      return
+    }
+    if (event.type === 'compaction/end' || event.type === 'compaction/summary' || event.type === 'compaction/prune') {
+      state.compactingUntil = 0
       return
     }
     if (event.type === 'approval/decided') {
@@ -124,6 +161,10 @@ export async function apply(ctx) {
     }
     if (event.type === 'turn/end') {
       state.toolActive = 0
+      // 轮次结束兜底：提问挂起与压缩态一并清除，避免跨轮阻塞。
+      state.askPending = false
+      state.askCallId = null
+      state.compactingUntil = 0
       // 批准后的 hacker 在对话完成时结束；rejected 跨轮存活、只被打字消费。
       if (sid && state.approvalSessionId === sid && state.lastApproval === 'allowed-once') {
         state.lastApproval = null
@@ -169,6 +210,9 @@ export async function apply(ctx) {
       surprisedUntil: state.surprisedUntil,
       cryingUntil: state.cryingUntil,
       admirableUntil: state.admirableUntil,
+      waitingAnswer: state.askPending,
+      beggingUntil: state.beggingUntil,
+      compacting: state.compactingUntil > Date.now(),
     }
   }
 

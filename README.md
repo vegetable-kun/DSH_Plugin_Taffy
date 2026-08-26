@@ -30,8 +30,11 @@ dsh plugin --profile web add github:vegetable-kun/DSH_Plugin_Taffy
 | 被阻塞了… | `taffy-cry` | turn/end reason=blocked，6 秒 |
 | 得意 | `taffy-admirable` | 一轮用 ≥5 次工具后正常完成，4 秒 |
 | 假哭 | `taffy-fake_crying` | 连续两次拒绝审批，5 秒 |
+| 求饶 | `taffy-begging` | 60 秒内第二次审批请求，5 秒窗口（过期回落待审批）|
+| 等你回答 | `taffy-staring` 静态图 | ask_user_question 提问挂起，回答即恢复 |
+| 记忆压缩中 | `taffy-pressure` 静态图 | 上下文压缩 start→end（含 90 秒兜底）|
 
-优先级链：锁定 > 待审批 > 批准庆祝 > 惊讶 > 哭 > 中止/出错/假哭闪帧 > 得意 > 运行中(黑客/思考/工具) > 打字 > 闲置。
+优先级链：锁定 > 求饶(时间盒) > 等你回答 > 记忆压缩 > 待审批 > 批准庆祝 > 惊讶 > 哭 > 中止/出错/假哭闪帧 > 得意 > 运行中(黑客/思考/工具) > 打字 > 闲置。所有新状态都有明确出口：求饶是时间盒、等你回答由回答消息/结果配对/轮次结束三路清除、压缩由 end 事件加兜底超时双保险，均不会阻塞下层状态。
 
 ## 使用
 

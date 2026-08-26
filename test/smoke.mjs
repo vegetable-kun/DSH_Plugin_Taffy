@@ -161,12 +161,65 @@ emit({ type: 'turn/end', data: { reason: { kind: 'aborted' } } })
   assert.equal(approvalCalls[0].toolName, 'taffy-test-approve')
 }
 
+// —— 新状态 1：等你回答（ask_user_question）—— //
+emit({ type: 'tool/call', data: { callId: 'c-ask-1', name: 'ask_user_question', arguments: '{}' } })
+{
+  const body = JSON.parse((await call('/api/state')).body)
+  assert.equal(body.state.waitingAnswer, true, 'ask 挂起应置 waitingAnswer')
+}
+// 回答到达 → 消费提问态且不算插话（对比前后 surprisedUntil 不变）
+emit({ type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: 'x' } } })
+const beforeAnswer = JSON.parse((await call('/api/state')).body).state
+emit({ type: 'user/message', data: {} })
+{
+  const body = JSON.parse((await call('/api/state')).body)
+  assert.equal(body.state.waitingAnswer, false, '回答消息清除挂起')
+  assert.equal(body.state.surprisedUntil, beforeAnswer.surprisedUntil, '答题不算插话，不触发惊讶')
+}
+// 结果配对清除：不匹配的 result 保持挂起，配对的清除
+emit({ type: 'tool/call', data: { callId: 'c-ask-2', name: 'ask_user_question', arguments: '{}' } })
+emit({ type: 'tool/result', data: { message: { toolCallId: 'c-other' } } })
+{
+  const body = JSON.parse((await call('/api/state')).body)
+  assert.equal(body.state.waitingAnswer, true, '不匹配的 result 不清除挂起')
+}
+emit({ type: 'tool/result', data: { message: { toolCallId: 'c-ask-2' } } })
+{
+  const body = JSON.parse((await call('/api/state')).body)
+  assert.equal(body.state.waitingAnswer, false, '配对 result 清除挂起')
+}
+
+// —— 新状态 2：求饶窗口（60 秒内第二次审批请求）—— //
+emit({ type: 'approval/asked', data: {} })
+emit({ type: 'approval/decided', data: { outcome: 'allowed-once' } })
+emit({ type: 'approval/asked', data: {} }) // 60 秒内第二次 → 求饶
+{
+  const body = JSON.parse((await call('/api/state')).body)
+  assert.ok(body.state.beggingUntil > Date.now(), '60 秒内二次请求应置 beggingUntil')
+}
+emit({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
+
+// —— 新状态 3：压缩记忆（start 开、end 关）—— //
+emit({ type: 'compaction/start', data: {} })
+{
+  const body = JSON.parse((await call('/api/state')).body)
+  assert.equal(body.state.compacting, true)
+}
+emit({ type: 'compaction/end', data: {} })
+{
+  const body = JSON.parse((await call('/api/state')).body)
+  assert.equal(body.state.compacting, false, 'end 应关闭压缩态')
+}
+
 // —— 素材路由 —— //
 {
   const res = await call('/dsh-taffy-mood/assets/taffy-cry.gif')
   assert.equal(res.code, 200)
   assert.match(res.type, /image\/gif/)
   assert.ok(res.chunks[0].length > 1000, 'GIF 字节非空')
+  const jpg = await call('/dsh-taffy-mood/assets/taffy-staring.jpg')
+  assert.equal(jpg.code, 200)
+  assert.match(jpg.type, /image\/jpeg/)
   const missing = await call('/dsh-taffy-mood/assets/not-on-list.gif')
   assert.equal(missing.code, 404)
   const traversal = await call('/dsh-taffy-mood/assets/../host.js')
