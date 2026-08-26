@@ -211,6 +211,39 @@ emit({ type: 'compaction/end', data: {} })
   assert.equal(body.state.compacting, false, 'end 应关闭压缩态')
 }
 
+// —— 新状态 4/5：长任务疲惫 + 审批没人理（平移 Date.now 模拟时间流逝）—— //
+const realNow = Date.now
+try {
+  // 疲惫：turn/start 后快进 3 分钟零 1 秒
+  emit({ type: 'turn/start', data: { turn: 1 } })
+  Date.now = () => realNow() + (3 * 60 + 1) * 1000
+  {
+    const body = JSON.parse((await call('/api/state')).body)
+    assert.equal(body.state.tired, true, '单轮超 3 分钟应置 tired')
+  }
+  emit({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
+  {
+    const body = JSON.parse((await call('/api/state')).body)
+    assert.equal(body.state.tired, false, 'turn/end 清除疲惫')
+  }
+
+  // 没人理：审批挂起后快进 31 秒；决定落地即恢复
+  emit({ type: 'approval/asked', data: {} })
+  Date.now = () => realNow() + 31 * 1000
+  {
+    const body = JSON.parse((await call('/api/state')).body)
+    assert.equal(body.state.ignoredApproval, true, '挂超 30 秒应置 ignoredApproval')
+  }
+  Date.now = realNow
+  emit({ type: 'approval/decided', data: { outcome: 'allowed-once' } })
+  {
+    const body = JSON.parse((await call('/api/state')).body)
+    assert.equal(body.state.ignoredApproval, false, '决定后清除 ignoredApproval')
+  }
+} finally {
+  Date.now = realNow
+}
+
 // —— 素材路由 —— //
 {
   const res = await call('/dsh-taffy-mood/assets/taffy-cry.gif')

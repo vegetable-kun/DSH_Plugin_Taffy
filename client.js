@@ -46,6 +46,8 @@ window.__ModuleLoader__.load({
       fakeCrying: ASSET_BASE + 'taffy-fake_crying.gif',
       waiting: ASSET_BASE + 'taffy-staring.jpg',
       compacting: ASSET_BASE + 'taffy-pressure.jpg',
+      tired: ASSET_BASE + 'taffy-angry_staring.jpg',
+      ignoredApproval: ASSET_BASE + 'taffy-cry_denying.gif',
     }
 
     var LOCKMOODS = {
@@ -156,7 +158,7 @@ window.__ModuleLoader__.load({
         return slots.register(
           { name: 'shell.overlay', id: 'taffy-gif' },
           function () {
-            var hostState0 = { running: false, phase: 'wait', approvalPending: false, lastApproval: null, lastApprovalAt: 0, turnFlash: null, turnFlashAt: 0, locked: null, surprisedUntil: 0, cryingUntil: 0, admirableUntil: 0, waitingAnswer: false, beggingUntil: 0, compacting: false }
+            var hostState0 = { running: false, phase: 'wait', approvalPending: false, lastApproval: null, lastApprovalAt: 0, turnFlash: null, turnFlashAt: 0, locked: null, surprisedUntil: 0, cryingUntil: 0, admirableUntil: 0, waitingAnswer: false, beggingUntil: 0, compacting: false, tired: false, ignoredApproval: false }
             var hostStateTuple = React.useState(hostState0)
             var hostState = hostStateTuple[0]
             var setHostState = hostStateTuple[1]
@@ -183,7 +185,7 @@ window.__ModuleLoader__.load({
                     if (r && r.state) {
                       var s = r.state
                       setHostState(function (prev) {
-                        if (prev.running === !!s.running && prev.phase === (s.phase || 'wait') && prev.approvalPending === !!s.approvalPending && prev.lastApproval === s.lastApproval && prev.lastApprovalAt === s.lastApprovalAt && prev.turnFlash === s.turnFlash && prev.turnFlashAt === s.turnFlashAt && prev.locked === (s.locked || null) && prev.surprisedUntil === (s.surprisedUntil || 0) && prev.cryingUntil === (s.cryingUntil || 0) && prev.admirableUntil === (s.admirableUntil || 0) && prev.waitingAnswer === !!s.waitingAnswer && prev.beggingUntil === (s.beggingUntil || 0) && prev.compacting === !!s.compacting) return prev
+                        if (prev.running === !!s.running && prev.phase === (s.phase || 'wait') && prev.approvalPending === !!s.approvalPending && prev.lastApproval === s.lastApproval && prev.lastApprovalAt === s.lastApprovalAt && prev.turnFlash === s.turnFlash && prev.turnFlashAt === s.turnFlashAt && prev.locked === (s.locked || null) && prev.surprisedUntil === (s.surprisedUntil || 0) && prev.cryingUntil === (s.cryingUntil || 0) && prev.admirableUntil === (s.admirableUntil || 0) && prev.waitingAnswer === !!s.waitingAnswer && prev.beggingUntil === (s.beggingUntil || 0) && prev.compacting === !!s.compacting && prev.tired === !!s.tired && prev.ignoredApproval === !!s.ignoredApproval) return prev
                         return {
                           running: !!s.running,
                           phase: s.phase || 'wait',
@@ -199,6 +201,8 @@ window.__ModuleLoader__.load({
                           waitingAnswer: !!s.waitingAnswer,
                           beggingUntil: s.beggingUntil || 0,
                           compacting: !!s.compacting,
+                          tired: !!s.tired,
+                          ignoredApproval: !!s.ignoredApproval,
                         }
                       })
                     }
@@ -257,6 +261,11 @@ window.__ModuleLoader__.load({
               // 压缩记忆：host 端 end 归零 + 90 秒兜底，双保险防卡死
               src = GIFS.compacting
               alt = '记忆压缩中…'
+            } else if (hostState.ignoredApproval) {
+              // 审批挂超 30 秒没人理：升级成 cry_denying，决定一落地即自动消失
+              src = GIFS.ignoredApproval
+              alt = '审批没人理，呜哇…'
+              pulsing = true
             } else if (hostState.approvalPending) {
               src = GIFS.approval
               alt = '需要审批'
@@ -284,6 +293,10 @@ window.__ModuleLoader__.load({
             } else if (hostState.admirableUntil > now) {
               src = GIFS.admirable
               alt = '大任务完成！'
+            } else if (hostState.tired) {
+              // 单轮超 3 分钟：疲惫压过运行态；turn/end 即清，无阻塞
+              src = GIFS.tired
+              alt = '干了这么久，好累啊…'
             } else if (hostState.running) {
               if (hostState.lastApproval === 'allowed-once') {
                 src = GIFS.hacker
@@ -476,7 +489,7 @@ window.__ModuleLoader__.load({
         return slots.register(
           { name: 'tool.view.cordis', key: 'self' },
           function () {
-            var stTuple = React.useState({ running: false, phase: 'wait', approvalPending: false, locked: null, waitingAnswer: false, compacting: false })
+            var stTuple = React.useState({ running: false, phase: 'wait', approvalPending: false, locked: null, waitingAnswer: false, compacting: false, tired: false, ignoredApproval: false })
             var st = stTuple[0]
             var setSt = stTuple[1]
             var msgTuple = React.useState('')
@@ -491,7 +504,7 @@ window.__ModuleLoader__.load({
                     if (!alive) return
                     if (r && r.state) {
                       var s = r.state
-                      setSt({ running: !!s.running, phase: s.phase || 'wait', approvalPending: !!s.approvalPending, locked: s.locked || null, waitingAnswer: !!s.waitingAnswer, compacting: !!s.compacting })
+                      setSt({ running: !!s.running, phase: s.phase || 'wait', approvalPending: !!s.approvalPending, locked: s.locked || null, waitingAnswer: !!s.waitingAnswer, compacting: !!s.compacting, tired: !!s.tired, ignoredApproval: !!s.ignoredApproval })
                     }
                   } catch (eConsolePoll) { /* Host 未就绪时下一轮重试 */ }
                   await delay(500)
@@ -504,6 +517,8 @@ window.__ModuleLoader__.load({
             if (st.locked) statusText = '已锁定：' + (LOCKMOODS[st.locked] ? LOCKMOODS[st.locked].label : st.locked)
             else if (st.waitingAnswer) statusText = '等你回答'
             else if (st.compacting) statusText = '记忆压缩中'
+            else if (st.tired) statusText = '长任务疲惫'
+            else if (st.ignoredApproval) statusText = '审批没人理'
             else if (st.approvalPending) statusText = '等待审批'
             else if (st.running) statusText = st.phase === 'stream' ? '模型思考中' : '工具执行中'
             var moodButtons = Object.keys(LOCKMOODS).map(function (k) {

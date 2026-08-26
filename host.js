@@ -28,6 +28,7 @@ const ASSET_TYPES = new Map([
   ['taffy-begging.gif', 'image/gif'],
   ['taffy-admirable.gif', 'image/gif'],
   ['taffy-fake_crying.gif', 'image/gif'],
+  ['taffy-cry_denying.gif', 'image/gif'],
   ['tafei.jpg', 'image/jpeg'],
   ['tafei3.jpg', 'image/jpeg'],
   ['taffy4.jpg', 'image/jpeg'],
@@ -62,7 +63,13 @@ export async function apply(ctx) {
     beggingUntil: 0,
     // 压缩记忆：compaction/start 置时间戳（含 90 秒兜底），end/summary/prune 归零
     compactingUntil: 0,
+    // 长任务疲惫：本轮起点，超阈值后运行态改显疲惫（turn/end 清零）
+    turnStartedAt: 0,
+    // 审批没人理：首个审批挂起的时刻（pending 归零即清），超阈值改显 cry_denying
+    approvalFirstAskedAt: 0,
   }
+  const TIRED_AFTER_MS = 3 * 60 * 1000
+  const IGNORED_AFTER_MS = 30 * 1000
   const lockable = new Set(['idle', 'thinking', 'tool', 'hacker', 'celebrate', 'rejected', 'angry', 'suicide', 'surprised', 'crying', 'begging', 'admirable', 'fake_crying'])
 
   const sessionIdOf = (session) => {
@@ -92,6 +99,8 @@ export async function apply(ctx) {
     if (event.type === 'tool/call') {
       state.toolActive += 1
       state.turnToolCalls += 1
+      // 插件中途激活会漏掉 turn/start：首个工具调用兜底补记本轮起点
+      if (state.turnStartedAt === 0) state.turnStartedAt = Date.now()
       // 等你回答：ask_user_question 发出即挂起，直到回答消息/结果配对/轮次结束清除
       if (event.data && event.data.name === 'ask_user_question') {
         state.askCallId = event.data.callId || null
@@ -123,6 +132,7 @@ export async function apply(ctx) {
     }
     if (event.type === 'approval/asked') {
       state.approvalPending += 1
+      if (state.approvalPending === 1) state.approvalFirstAskedAt = Date.now()
       if (sid) state.approvalSessionId = sid
       const t = Date.now()
       // 60 秒内第二次请求 → 5 秒求饶窗口；时间盒过期自动回落 fork，不会卡死。
@@ -141,6 +151,7 @@ export async function apply(ctx) {
     }
     if (event.type === 'approval/decided') {
       state.approvalPending = Math.max(0, state.approvalPending - 1)
+      if (state.approvalPending === 0) state.approvalFirstAskedAt = 0
       const outcome = event.data && event.data.outcome
       if (outcome === 'allowed-once' || outcome === 'rejected') {
         state.lastApproval = outcome
@@ -159,8 +170,13 @@ export async function apply(ctx) {
       }
       return
     }
+    if (event.type === 'turn/start') {
+      state.turnStartedAt = Date.now()
+      return
+    }
     if (event.type === 'turn/end') {
       state.toolActive = 0
+      state.turnStartedAt = 0
       // 轮次结束兜底：提问挂起与压缩态一并清除，避免跨轮阻塞。
       state.askPending = false
       state.askCallId = null
@@ -213,6 +229,8 @@ export async function apply(ctx) {
       waitingAnswer: state.askPending,
       beggingUntil: state.beggingUntil,
       compacting: state.compactingUntil > Date.now(),
+      tired: state.turnStartedAt > 0 && Date.now() - state.turnStartedAt > TIRED_AFTER_MS,
+      ignoredApproval: state.approvalPending > 0 && state.approvalFirstAskedAt > 0 && Date.now() - state.approvalFirstAskedAt > IGNORED_AFTER_MS,
     }
   }
 
