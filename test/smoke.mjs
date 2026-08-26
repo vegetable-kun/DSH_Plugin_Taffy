@@ -244,6 +244,20 @@ try {
   Date.now = realNow
 }
 
+// —— 新状态 6：休眠（空闲超 10 分钟切静态，任何活动即醒）—— //
+emit({ type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: 'wake' } } })
+Date.now = () => realNow() + 11 * 60 * 1000
+{
+  const body = JSON.parse((await call('/api/state')).body)
+  assert.equal(body.state.sleeping, true, '空闲超 10 分钟应置 sleeping')
+}
+Date.now = realNow
+emit({ type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: 'awake' } } })
+{
+  const body = JSON.parse((await call('/api/state')).body)
+  assert.equal(body.state.sleeping, false, '活动后应唤醒')
+}
+
 // —— 素材路由 —— //
 {
   const res = await call('/dsh-taffy-mood/assets/taffy-cry.gif')

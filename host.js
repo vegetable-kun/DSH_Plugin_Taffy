@@ -67,9 +67,12 @@ export async function apply(ctx) {
     turnStartedAt: 0,
     // 审批没人理：首个审批挂起的时刻（pending 归零即清），超阈值改显 cry_denying
     approvalFirstAskedAt: 0,
+    // 休眠：最近一次会话活动时刻，超阈值且无更高状态时切静态图省解码
+    lastActivityAt: Date.now(),
   }
   const TIRED_AFTER_MS = 3 * 60 * 1000
   const IGNORED_AFTER_MS = 30 * 1000
+  const SLEEP_AFTER_MS = 10 * 60 * 1000
   const lockable = new Set(['idle', 'thinking', 'tool', 'hacker', 'celebrate', 'rejected', 'angry', 'suicide', 'surprised', 'crying', 'begging', 'admirable', 'fake_crying'])
 
   const sessionIdOf = (session) => {
@@ -91,6 +94,8 @@ export async function apply(ctx) {
 
   ctx.effect(() => ctx.on('session/event', (session, event) => {
     if (!event || typeof event.type !== 'string') return
+    // 任何会话活动都算"醒着"（chunk 高频但只是一次赋值，代价可忽略）
+    state.lastActivityAt = Date.now()
     const sid = sessionIdOf(session)
     if (event.type === 'assistant/chunk') {
       state.lastChunkAt = Date.now()
@@ -231,6 +236,7 @@ export async function apply(ctx) {
       compacting: state.compactingUntil > Date.now(),
       tired: state.turnStartedAt > 0 && Date.now() - state.turnStartedAt > TIRED_AFTER_MS,
       ignoredApproval: state.approvalPending > 0 && state.approvalFirstAskedAt > 0 && Date.now() - state.approvalFirstAskedAt > IGNORED_AFTER_MS,
+      sleeping: Date.now() - state.lastActivityAt > SLEEP_AFTER_MS,
     }
   }
 
