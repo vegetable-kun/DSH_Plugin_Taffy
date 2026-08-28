@@ -399,3 +399,16 @@ console.log('smoke: all assertions passed (' + routes.length + ' route, ' + even
   await call('/dsh-taffy-mood/api/action?action=lock', { method: 'POST' })
   console.log('rev: pass (单数字 diff 正确递增)')
 }
+
+// —— bug 1 fix: turn 启动瞬间（不依赖 agents/chunks）应直接 running=true —— //
+{
+  emit({ type: 'turn/end', data: { reason: { kind: 'completed' } } })  // 清 turnStartedAt
+  // 临时把假 agents 调成全 idle，专门验证纯 turnStartedAt 信号
+  const prevAgents = agentsSvc.list
+  agentsSvc.list = () => []
+  emit({ type: 'turn/start', data: { turn: 99 } })
+  const body = JSON.parse((await call('/dsh-taffy-mood/api/state')).body)
+  assert.equal(body.state.running, true, 'turn 启动瞬间、agents 全 idle 时仍应 running=true')
+  agentsSvc.list = prevAgents
+  console.log('bug1: pass (turn 启动立刻 running，不等 agents 状态翻转)')
+}

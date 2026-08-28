@@ -264,7 +264,7 @@ export async function apply(ctx, config) {
     if (state.toolActive > 0) phase = 'tool'
     else if (Date.now() - state.lastChunkAt < 2000) phase = 'stream'
     return {
-      running: computeRunning() > 0 || phase !== 'wait',
+      running: computeRunning() > 0 || state.turnStartedAt > 0 || phase !== 'wait',
       phase,
       approvalPending: state.approvalPending > 0,
       lastApproval: state.lastApproval,

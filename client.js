@@ -229,17 +229,16 @@ window.__ModuleLoader__.load({
     }
     // 写动作走 POST；POST + text/plain 走简单请求路径，跨源会被浏览器预检拦掉
     // 同源 POST 携带 Origin: <同源>，被 host 的 Origin 校验放过
-    async function postAction(action, query) {
-      const qs = query ? '?' + query : ''
-      const res = await fetch(API_BASE + '/action' + qs, {
+    async function postAction(action, extraQuery) {
+      var qs = 'action=' + encodeURIComponent(action) + (extraQuery ? '&' + extraQuery : '')
+      const res = await fetch(API_BASE + '/action?' + qs, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
       })
       return res.json()
     }
-    function act(action, query) {
-      var qs = query ? query : ''
-      return postAction(action, qs)
+    function act(action, extraQuery) {
+      return postAction(action, extraQuery)
     }
     // 轮询节奏：活跃时 300ms（更跟手），无任何活跃态时 2s（够抓审批弹窗/host 变化）
     var POLL_ACTIVE_MS = 300
