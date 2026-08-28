@@ -121,6 +121,9 @@ window.__ModuleLoader__.load({
       var qs = '?action=' + encodeURIComponent(action) + (query ? '&' + query : '')
       return api('/action' + qs)
     }
+    // 轮询节奏：活跃时 300ms（更跟手），无任何活跃态时 2s（够抓审批弹窗/host 变化）
+    var POLL_ACTIVE_MS = 300
+    var POLL_IDLE_MS = 2000
 
     var CSS_TEXT = '.taffy-pulse{animation:taffyPulse 1.1s ease-in-out infinite}@keyframes taffyPulse{0%,100%{transform:scale(1)}50%{transform:scale(1.08)}}.taffy-preload{position:absolute;width:1px;height:1px;overflow:hidden;opacity:0;pointer-events:none}.taffy-set-row{display:flex;align-items:center;justify-content:space-between;margin:14px 0;gap:16px}.taffy-set-label{font-size:13px;font-weight:600}.taffy-set-hint{font-size:11px;opacity:.6;margin-top:2px}.taffy-set-input{width:180px}.taffy-drag-shield{position:fixed;top:0;left:0;right:0;bottom:0;z-index:100000;cursor:grabbing}.taffy-close-shield{position:fixed;top:0;left:0;right:0;bottom:0;z-index:100001}.taffy-panel{display:flex;flex-direction:column;gap:10px;padding:12px;border-top:1px solid rgba(128,128,128,.25);font-size:12px}.taffy-panel-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.taffy-panel-badge{display:inline-block;padding:2px 10px;border-radius:10px;background:#4f7cff;color:#fff;font-weight:600}.taffy-panel-badge.locked{background:#e67e22}.taffy-panel button{padding:4px 12px;border-radius:6px;border:1px solid rgba(128,128,128,.35);background:transparent;color:inherit;cursor:pointer;font-size:12px}.taffy-panel button.on{background:#4f7cff;color:#fff;border-color:#4f7cff}.taffy-panel-msg{opacity:.75;font-size:11px;min-height:14px}.taffy-menu{position:fixed;z-index:100002;background:rgba(30,30,36,.98);color:#eee;border:1px solid rgba(128,128,128,.35);border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.45);min-width:250px;max-width:320px}.taffy-menu .taffy-panel{border-top:none;padding:10px}'
 
@@ -188,15 +191,35 @@ window.__ModuleLoader__.load({
               var alive = true
               var notify = function () { bump(function (n) { return n + 1 }) }
               listeners.add(notify)
+              // 算下一次必须渲染的时刻：
+              //   - 任一需要轮询捕获的状态活跃 → 300ms 后再查
+              //   - 否则挑最近一个 client 端时间态到期点 + 兜底 2s
+              var computeNextDueAt = function (s, t) {
+                if (!s) return t + POLL_IDLE_MS
+                if (s.running || s.approvalPending || s.waitingAnswer || s.compacting) return t + POLL_ACTIVE_MS
+                var due = t + POLL_IDLE_MS
+                if (s.surprisedUntil > t && s.surprisedUntil < due) due = s.surprisedUntil
+                if (s.cryingUntil > t && s.cryingUntil < due) due = s.cryingUntil
+                if (s.admirableUntil > t && s.admirableUntil < due) due = s.admirableUntil
+                if (s.beggingUntil > t && s.beggingUntil < due) due = s.beggingUntil
+                var flashEnd = s.turnFlashAt + 5000
+                if (s.turnFlash !== null && s.turnFlashAt > 0 && flashEnd > t && flashEnd < due) due = flashEnd
+                var greetEnd = greetUntil
+                if (greetEnd > t && greetEnd < due) due = greetEnd
+                return due
+              }
               var loop = async function () {
+                var t = Date.now()
                 while (alive) {
                   try {
                     var r = await api('/state')
                     if (!alive) return
                     if (r && r.state) {
                       var s = r.state
+                      var applied = false
                       setHostState(function (prev) {
                         if (prev.running === !!s.running && prev.phase === (s.phase || 'wait') && prev.approvalPending === !!s.approvalPending && prev.lastApproval === s.lastApproval && prev.lastApprovalAt === s.lastApprovalAt && prev.turnFlash === s.turnFlash && prev.turnFlashAt === s.turnFlashAt && prev.locked === (s.locked || null) && prev.surprisedUntil === (s.surprisedUntil || 0) && prev.cryingUntil === (s.cryingUntil || 0) && prev.admirableUntil === (s.admirableUntil || 0) && prev.waitingAnswer === !!s.waitingAnswer && prev.beggingUntil === (s.beggingUntil || 0) && prev.compacting === !!s.compacting && prev.tired === !!s.tired && prev.ignoredApproval === !!s.ignoredApproval && prev.sleeping === !!s.sleeping) return prev
+                        applied = true
                         return {
                           running: !!s.running,
                           phase: s.phase || 'wait',
@@ -217,10 +240,20 @@ window.__ModuleLoader__.load({
                           sleeping: !!s.sleeping,
                         }
                       })
+                      // 状态无变化且有活跃时间态到期点即将到来，仍需 bump 让 React 重渲染来"等过期"
+                      if (!applied) {
+                        var nowT = Date.now()
+                        if (computeNextDueAt(s, nowT) - nowT < POLL_IDLE_MS) bump(function (n) { return n + 1 })
+                      }
+                      t = Date.now()
+                      await delay(Math.max(50, computeNextDueAt(s, t) - t))
+                    } else {
+                      await delay(POLL_IDLE_MS)
                     }
-                  } catch (eApiPoll) { /* Host 未就绪时下一轮重试 */ }
+                  } catch (eApiPoll) { /* Host 未就绪时下一轮重试 */
+                    await delay(POLL_IDLE_MS)
+                  }
                   notify()
-                  await delay(500)
                 }
               }
               loop()
