@@ -290,7 +290,9 @@ window.__ModuleLoader__.load({
         return slots.register(
           { name: 'shell.overlay', id: 'taffy-gif' },
           function () {
-            var hostState0 = { rev: 0, running: false, phase: 'wait', approvalPending: false, lastApproval: null, lastApprovalAt: 0, turnFlash: null, turnFlashAt: 0, locked: null, surprisedUntil: 0, cryingUntil: 0, admirableUntil: 0, waitingAnswer: false, beggingUntil: 0, compacting: false, tired: false, ignoredApproval: false, sleeping: false }
+            // rev: -1 哨兵：首次 fetch 时 prev.rev(-1) !== nextRev(0) 必触发 setState 注入真实数据
+            // 后续 prev.rev=N === nextRev=N 才短路
+            var hostState0 = { rev: -1, running: false, phase: 'wait', approvalPending: false, lastApproval: null, lastApprovalAt: 0, turnFlash: null, turnFlashAt: 0, locked: null, surprisedUntil: 0, cryingUntil: 0, admirableUntil: 0, waitingAnswer: false, beggingUntil: 0, compacting: false, tired: false, ignoredApproval: false, sleeping: false }
             var hostStateTuple = React.useState(hostState0)
             var hostState = hostStateTuple[0]
             var setHostState = hostStateTuple[1]

@@ -1,5 +1,7 @@
 // 冒烟测试：假 ctx 跑 apply，断言事件状态机与三条路由。node test/smoke.mjs
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { apply } from '../host.js'
 
 function makeFakeRes() {
@@ -411,4 +413,15 @@ console.log('smoke: all assertions passed (' + routes.length + ' route, ' + even
   assert.equal(body.state.running, true, 'turn 启动瞬间、agents 全 idle 时仍应 running=true')
   agentsSvc.list = prevAgents
   console.log('bug1: pass (turn 启动立刻 running，不等 agents 状态翻转)')
+}
+
+// —— rev 哨兵守门：保证 host 端 rev 起始为 0、首次 fetch 必触发 setState 注入真实数据 —— //
+{
+  const initRev = JSON.parse((await call('/dsh-taffy-mood/api/state')).body).state.rev
+  assert.equal(typeof initRev, 'number', 'host 端 rev 应为数字')
+  assert.ok(initRev >= 0, 'host 端 rev 不应为负')
+  // 验证 client.js hostState0 用 -1 哨兵（不是 0），保证首次 fetch 必触发 setState 注入真实数据
+  const clientSrc = readFileSync(join(import.meta.dirname, '..', 'client.js'), 'utf8')
+  assert.match(clientSrc, /var hostState0 = \{ rev: -1/, 'client hostState0 哨兵应为 -1（非 0），避首次短路')
+  console.log('rev-sentinel: pass (host rev=' + initRev + ' ≥ 0，client -1 哨兵避首次短路)')
 }
