@@ -553,10 +553,16 @@ window.__ModuleLoader__.load({
               openMenu(e)
             }
             var doLock = function (key) {
-              act('lock', 'mood=' + encodeURIComponent(key)).catch(function () {})
+              setMenuMsg('锁定 ' + key + '…')
+              act('lock', 'mood=' + encodeURIComponent(key))
+                .then(function (r) { setMenuMsg(r && r.ok ? '已锁定：' + key : '锁定失败：' + (r && r.message || '未知错误')) })
+                .catch(function (eLock) { setMenuMsg('锁定失败：' + (eLock && eLock.message || eLock)); console.warn('[taffy] lock failed', eLock) })
             }
             var doUnlock = function () {
-              act('lock').catch(function () {})
+              setMenuMsg('解除锁定…')
+              act('lock')
+                .then(function () { setMenuMsg('已解除锁定') })
+                .catch(function (eUnlock) { setMenuMsg('解除失败：' + (eUnlock && eUnlock.message || eUnlock)); console.warn('[taffy] unlock failed', eUnlock) })
             }
             var doTest = async function () {
               setMenuMsg('正在发起测试审批…')
@@ -565,6 +571,7 @@ window.__ModuleLoader__.load({
                 setMenuMsg(r && r.ok ? r.message : '失败：' + ((r && r.message) || '未知错误'))
               } catch (eTest) {
                 setMenuMsg('失败：' + String(eTest && eTest.message ? eTest.message : eTest))
+                console.warn('[taffy] test-approve failed', eTest)
               }
             }
             var doResetPos = function () {
@@ -748,7 +755,12 @@ window.__ModuleLoader__.load({
               return React.createElement('button', {
                 key: k,
                 className: st.locked === k ? 'on' : '',
-                onClick: function () { act('lock', 'mood=' + encodeURIComponent(k)).catch(function () {}) },
+                onClick: function () {
+                  setMsg('锁定 ' + k + '…')
+                  act('lock', 'mood=' + encodeURIComponent(k))
+                    .then(function (r) { setMsg(r && r.ok ? '已锁定：' + k : '失败：' + (r && r.message || '未知错误')) })
+                    .catch(function (eLock) { setMsg('失败：' + (eLock && eLock.message || eLock)); console.warn('[taffy] lock failed', eLock) })
+                },
               }, LOCKMOODS[k].label)
             })
             return React.createElement('div', { className: 'taffy-panel' },
@@ -758,7 +770,12 @@ window.__ModuleLoader__.load({
               React.createElement('div', { className: 'taffy-panel-row' },
                 React.createElement('span', null, '锁定：'),
                 moodButtons,
-                React.createElement('button', { className: st.locked ? '' : 'on', onClick: function () { act('lock').catch(function () {}) } }, '自动')),
+                React.createElement('button', { className: st.locked ? '' : 'on', onClick: function () {
+                  setMsg('解除锁定…')
+                  act('lock')
+                    .then(function () { setMsg('已解除锁定') })
+                    .catch(function (eUnlock) { setMsg('失败：' + (eUnlock && eUnlock.message || eUnlock)); console.warn('[taffy] unlock failed', eUnlock) })
+                } }, '自动')),
               React.createElement('div', { className: 'taffy-panel-row' },
                 React.createElement('button', { onClick: function () {
                   setMsg('正在发起测试审批…')
@@ -766,6 +783,7 @@ window.__ModuleLoader__.load({
                     setMsg(r && r.ok ? r.message : '失败：' + ((r && r.message) || '未知错误'))
                   }).catch(function (eTest) {
                     setMsg('失败：' + String(eTest && eTest.message ? eTest.message : eTest))
+                    console.warn('[taffy] test-approve failed', eTest)
                   })
                 } }, '测试审批'),
                 React.createElement('button', { onClick: function () {

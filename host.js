@@ -110,9 +110,13 @@ export async function apply(ctx, config) {
     approvalFirstAskedAt: 0,
     // 休眠：最近一次会话活动时刻，超阈值且无更高状态时切静态图省解码
     lastActivityAt: Date.now(),
+    // 用户最近一次发消息时刻：保证回车后到 first chunk 之间的"刚启动"窗口也算工作中
+    userMessageAt: 0,
     // 单调递增版本号：任何可观察的状态变更都 +1；client 用它做单数字 diff
     rev: 0,
   }
+  // 关键阈值：用户按回车到 first chunk 之间算"工作中"，覆盖 turn/start 事件不可靠
+  const USER_MESSAGE_RUN_MS = 6 * 1000
   const TIRED_AFTER_MS = cfg.tired_after_ms
   const IGNORED_AFTER_MS = cfg.ignored_after_ms
   const SLEEP_AFTER_MS = cfg.sleep_after_ms
@@ -167,6 +171,9 @@ export async function apply(ctx, config) {
       return
     }
     if (event.type === 'user/message') {
+      // 任何 user/message 都标志着"用户刚发指令，agent 即将忙"：设最近发消息时间
+      // 兜底 turn/start 不可靠 + agents 列表翻 status 滞后 → running 判据
+      state.userMessageAt = Date.now()
       // 回答到达：消费提问态，不算插话（否则每次答题都误报惊讶）。
       if (state.askPending) {
         state.askPending = false
@@ -264,7 +271,7 @@ export async function apply(ctx, config) {
     if (state.toolActive > 0) phase = 'tool'
     else if (Date.now() - state.lastChunkAt < 2000) phase = 'stream'
     return {
-      running: computeRunning() > 0 || state.turnStartedAt > 0 || phase !== 'wait',
+      running: computeRunning() > 0 || state.turnStartedAt > 0 || (state.userMessageAt > 0 && Date.now() - state.userMessageAt < USER_MESSAGE_RUN_MS) || phase !== 'wait',
       phase,
       approvalPending: state.approvalPending > 0,
       lastApproval: state.lastApproval,
