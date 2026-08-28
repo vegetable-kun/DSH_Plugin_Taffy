@@ -3,7 +3,8 @@
 // 浏览器半边通过 /dsh-taffy-mood/api/* 轮询状态、提交动作（whale-musume 模式）。
 
 import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { createHash } from 'node:crypto'
+import { extname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export const name = 'dsh-taffy-mood'
@@ -59,7 +60,27 @@ export async function apply(ctx, config) {
       if (typeof v === 'number' && v > 0) cfg[k] = v
     }
   }
-  const cache = new Map()
+  // 内容哈希：启动时为每个允许分发的素材算 SHA256 截 8 hex
+  // URL 形如 /assets/<basename>.<hash>.<ext>，命中走 1 年强缓存
+  const assetHashes = new Map()  // name -> 8 hex
+  const hashedUrl = (name) => {
+    const h = assetHashes.get(name)
+    if (!h) return null
+    const dot = name.lastIndexOf('.')
+    if (dot <= 0) return null
+    return '/assets/' + name.slice(0, dot) + '.' + h + name.slice(dot)
+  }
+  const bytesByHash = new Map()  // h -> Uint8Array
+  await Promise.all(Array.from(ASSET_TYPES.keys()).map(async (name) => {
+    try {
+      const bytes = await readFile(join(ASSETS_DIR, name))
+      const h = createHash('sha256').update(bytes).digest('hex').slice(0, 8)
+      assetHashes.set(name, h)
+      bytesByHash.set(h, bytes)
+    } catch (err) {
+      // 缺失素材：跳过即可，路由返 404
+    }
+  }))
   const state = {
     approvalPending: 0,
     lastApproval: null,
@@ -229,12 +250,6 @@ export async function apply(ctx, config) {
     }
   }))
 
-  const readAsset = async (name) => {
-    if (!ASSET_TYPES.has(name)) return null
-    if (!cache.has(name)) cache.set(name, await readFile(join(ASSETS_DIR, name)))
-    return cache.get(name)
-  }
-
   const snapshot = () => {
     let phase = 'wait'
     if (state.toolActive > 0) phase = 'tool'
@@ -351,15 +366,58 @@ export async function apply(ctx, config) {
         }
         const assetPrefix = '/assets/'
         if (path.startsWith(assetPrefix)) {
-          const assetName = decodeURIComponent(path.slice(assetPrefix.length).split('?')[0])
-          const bytes = await readAsset(assetName)
-          if (bytes === null) {
-            res.writeHead(404, { 'Content-Type': 'text/plain' })
-            res.end('not found')
-            return
+          const requestName = decodeURIComponent(path.slice(assetPrefix.length).split('?')[0])
+          // 形式 1：带哈希的 URL /assets/<base>.<hash>.<ext>
+          //   base 含 .jpg/.gif 前的全部点也算进去（用 lastIndexOf 切第二段为 hash）
+          const dotExt = requestName.lastIndexOf('.')
+          if (dotExt > 0) {
+            const beforeExt = requestName.slice(0, dotExt)
+            const ext = requestName.slice(dotExt)
+            const dotHash = beforeExt.lastIndexOf('.')
+            if (dotHash > 0) {
+              const baseName = beforeExt.slice(0, dotHash) + ext
+              const hash = beforeExt.slice(dotHash + 1)
+              if (ASSET_TYPES.has(baseName) && /^[0-9a-f]{8}$/.test(hash)) {
+                const bytes = bytesByHash.get(hash)
+                if (bytes) {
+                  res.writeHead(200, {
+                    'Content-Type': ASSET_TYPES.get(baseName),
+                    'Cache-Control': 'public, max-age=31536000, immutable',
+                    'Content-Length': String(bytes.length),
+                  })
+                  res.end(bytes)
+                  return
+                }
+              }
+            }
           }
-          res.writeHead(200, { 'Content-Type': ASSET_TYPES.get(assetName), 'Cache-Control': 'no-store' })
-          res.end(bytes)
+          // 形式 2：老的无哈希 URL → 301 跳转到带哈希 URL（永久）
+          if (ASSET_TYPES.has(requestName)) {
+            const target = hashedUrl(requestName)
+            if (target) {
+              res.writeHead(301, {
+                Location: target,
+                'Cache-Control': 'public, max-age=300',
+              })
+              res.end()
+              return
+            }
+          }
+          res.writeHead(404, { 'Content-Type': 'text/plain' })
+          res.end('not found')
+          return
+        }
+        if (path === '/api/asset-index') {
+          // 启动时算好的 {name: hash} 映射表；client 拉一次拼 GIFS url
+          const idx = {}
+          for (const [name, h] of assetHashes) {
+            const dot = name.lastIndexOf('.')
+            const base = dot > 0 ? name.slice(0, dot) : name
+            const ext = dot > 0 ? name.slice(dot) : ''
+            idx[name] = base + '.' + h + ext
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+          res.end(JSON.stringify(idx))
           return
         }
         res.writeHead(404, { 'Content-Type': 'text/plain' })

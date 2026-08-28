@@ -6,11 +6,15 @@ function makeFakeRes() {
   const res = {
     code: null,
     type: null,
+    location: null,
+    cacheControl: null,
     body: null,
     chunks: [],
     writeHead(code, headers) {
       this.code = code
       this.type = headers && headers['Content-Type']
+      this.location = headers && headers.Location
+      this.cacheControl = headers && headers['Cache-Control']
     },
     end(chunk) {
       if (chunk) this.chunks.push(chunk)
@@ -265,21 +269,44 @@ emit({ type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: 'awak
   assert.equal(body.state.sleeping, false, '活动后应唤醒')
 }
 
-// —— 素材路由 —— //
+// —— 素材路由（含内容哈希 + 永久缓存）—— //
 {
-  const res = await call('/dsh-taffy-mood/assets/taffy-cry.gif')
-  assert.equal(res.code, 200)
-  assert.match(res.type, /image\/gif/)
-  assert.ok(res.chunks[0].length > 1000, 'GIF 字节非空')
-  const jpg = await call('/dsh-taffy-mood/assets/taffy-staring.jpg')
+  // 1. 老 URL 301 跳转到带 hash 的 URL
+  const legacy = await call('/dsh-taffy-mood/assets/taffy-cry.gif')
+  assert.equal(legacy.code, 301, '老 URL 应 301 跳转')
+  assert.match(legacy.location, /^\/assets\/taffy-cry\.[0-9a-f]{8}\.gif$/, 'Location 含 8 字符哈希')
+
+  // 2. 带 hash 的 URL 直接 200，immutable 缓存
+  const hashed = await call(legacy.location)
+  assert.equal(hashed.code, 200)
+  assert.match(hashed.type, /image\/gif/)
+  assert.match(hashed.cacheControl, /immutable/)
+  assert.match(hashed.cacheControl, /max-age=31536000/)
+  assert.ok(hashed.chunks[0].length > 1000, 'GIF 字节非空')
+
+  // 3. JPG 同理
+  const legacyJpg = await call('/dsh-taffy-mood/assets/taffy-staring.jpg')
+  assert.equal(legacyJpg.code, 301)
+  assert.match(legacyJpg.location, /^\/assets\/taffy-staring\.[0-9a-f]{8}\.jpg$/)
+  const jpg = await call(legacyJpg.location)
   assert.equal(jpg.code, 200)
   assert.match(jpg.type, /image\/jpeg/)
+
+  // 4. 白名单外 → 404
   const missing = await call('/dsh-taffy-mood/assets/not-on-list.gif')
   assert.equal(missing.code, 404)
   const traversal = await call('/dsh-taffy-mood/assets/../host.js')
   assert.equal(traversal.code, 404, '白名单外路径一律 404')
   const unknown = await call('/dsh-taffy-mood/nothing')
   assert.equal(unknown.code, 404)
+
+  // 5. /api/asset-index 返回 name→hashed-url 映射
+  const idx = await call('/dsh-taffy-mood/api/asset-index')
+  assert.equal(idx.code, 200)
+  const idxBody = JSON.parse(idx.body)
+  assert.ok(idxBody['taffy-cry.gif'] && /^taffy-cry\.[0-9a-f]{8}\.gif$/.test(idxBody['taffy-cry.gif']))
+  assert.ok(idxBody['taffy-staring.jpg'])
+  assert.equal(Object.keys(idxBody).length, 23, '应有 23 个素材映射')
 }
 
 console.log('smoke: all assertions passed (' + routes.length + ' route, ' + eventHandlers.length + ' listener)')

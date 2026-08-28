@@ -88,7 +88,8 @@ test/smoke.mjs     冒烟测试：node test/smoke.mjs
 - 插话判定 = 工具执行中或 2.5 秒内有 chunk，避免新轮次启动瞬间的时序误报
 - 打字检测用官方 `conversation.composer.dock` InputZone 的 `props.input.draft`
 - 阈值可通过 `~/.dsh/profiles/web/cordis.patch.yml` 覆盖（`config:` 字段，蛇形命名），如 `surprised_ms: 6000` / `sleep_after_ms: 600000`
-- 无构建步骤、无 npm 依赖：纯 ESM host + ModuleLoader 包装 client，clone 即源码即产物
+- 素材按内容哈希永久缓存（`max-age=31536000, immutable`），URL 形如 `/assets/taffy-cry.a1b2c3d4.gif`；换包换 URL 不卡旧版，老 URL 走 301 兼容
+- 纯 ESM host + ModuleLoader 包装 client，无构建步骤、无 npm 依赖，clone 即源码即产物
 
 有问题欢迎投issue和pr,喜欢就点个免费的star吧
 

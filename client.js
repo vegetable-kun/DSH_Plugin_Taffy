@@ -30,28 +30,44 @@ window.__ModuleLoader__.load({
       listeners.forEach(function (fn) { fn() })
     }
 
-    var GIFS = {
-      approval: ASSET_BASE + 'taffy-fork.gif',
-      rejected: ASSET_BASE + 'taffy-embarrassing.gif',
-      celebrate: ASSET_BASE + 'taffy-spread_heart.gif',
-      hacker: ASSET_BASE + 'taffy-hacker.gif',
-      running: ASSET_BASE + 'taffy-tang-laughing.gif',
-      thinking: ASSET_BASE + 'taffy-dumb.gif',
-      typing: ASSET_BASE + 'taffy-se_xy.gif',
-      angry: ASSET_BASE + 'taffy-angry.gif',
-      suicide: ASSET_BASE + 'taffy-suicide.gif',
-      idle: ASSET_BASE + 'taffy2-idling.gif',
-      surprised: ASSET_BASE + 'taffy-suprised.gif',
-      cry: ASSET_BASE + 'taffy-cry.gif',
-      begging: ASSET_BASE + 'taffy-begging.gif',
-      admirable: ASSET_BASE + 'taffy-admirable.gif',
-      fakeCrying: ASSET_BASE + 'taffy-fake_crying.gif',
-      waiting: ASSET_BASE + 'taffy-staring.jpg',
-      compacting: ASSET_BASE + 'taffy-pressure.jpg',
-      tired: ASSET_BASE + 'taffy-angry_staring.jpg',
-      ignoredApproval: ASSET_BASE + 'taffy-cry_denying.gif',
-      sleeping: ASSET_BASE + 'taffy4.jpg',
-      greeting: ASSET_BASE + 'tafei.jpg',
+    // mood → asset 原始文件名；启动时拉 /api/asset-index 把 url 改成带哈希的版本（永久缓存）
+    var MOOD_ASSET = {
+      approval: 'taffy-fork.gif',
+      rejected: 'taffy-embarrassing.gif',
+      celebrate: 'taffy-spread_heart.gif',
+      hacker: 'taffy-hacker.gif',
+      running: 'taffy-tang-laughing.gif',
+      thinking: 'taffy-dumb.gif',
+      typing: 'taffy-se_xy.gif',
+      angry: 'taffy-angry.gif',
+      suicide: 'taffy-suicide.gif',
+      idle: 'taffy2-idling.gif',
+      surprised: 'taffy-suprised.gif',
+      cry: 'taffy-cry.gif',
+      begging: 'taffy-begging.gif',
+      admirable: 'taffy-admirable.gif',
+      fakeCrying: 'taffy-fake_crying.gif',
+      waiting: 'taffy-staring.jpg',
+      compacting: 'taffy-pressure.jpg',
+      tired: 'taffy-angry_staring.jpg',
+      ignoredApproval: 'taffy-cry_denying.gif',
+      sleeping: 'taffy4.jpg',
+      greeting: 'tafei.jpg',
+    }
+    var GIFS = {}
+    for (var mk in MOOD_ASSET) GIFS[mk] = ASSET_BASE + MOOD_ASSET[mk]
+    async function loadAssetIndex() {
+      try {
+        var r = await fetch(API_BASE + '/asset-index')
+        if (!r.ok) return
+        var idx = await r.json()
+        for (var mk2 in MOOD_ASSET) {
+          var name = MOOD_ASSET[mk2]
+          if (idx && typeof idx[name] === 'string') {
+            GIFS[mk2] = ASSET_BASE + idx[name]
+          }
+        }
+      } catch (eAssetIdx) { /* host 未就绪时走老 URL，路由自动 301 兜底 */ }
     }
 
     var LOCKMOODS = {
@@ -145,8 +161,9 @@ window.__ModuleLoader__.load({
       })
     }
 
-    function apply(ctx) {
+    async function apply(ctx) {
       loadSettings()
+      await loadAssetIndex()  // 拿到带哈希的 url 后再注册 UI，避免首次预加载走老 URL
       var slots = ctx.get('slots')
       if (slots === undefined) return
 
