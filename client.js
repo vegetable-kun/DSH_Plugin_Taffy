@@ -198,7 +198,7 @@ window.__ModuleLoader__.load({
         return slots.register(
           { name: 'shell.overlay', id: 'taffy-gif' },
           function () {
-            var hostState0 = { running: false, phase: 'wait', approvalPending: false, lastApproval: null, lastApprovalAt: 0, turnFlash: null, turnFlashAt: 0, locked: null, surprisedUntil: 0, cryingUntil: 0, admirableUntil: 0, waitingAnswer: false, beggingUntil: 0, compacting: false, tired: false, ignoredApproval: false, sleeping: false }
+            var hostState0 = { rev: 0, running: false, phase: 'wait', approvalPending: false, lastApproval: null, lastApprovalAt: 0, turnFlash: null, turnFlashAt: 0, locked: null, surprisedUntil: 0, cryingUntil: 0, admirableUntil: 0, waitingAnswer: false, beggingUntil: 0, compacting: false, tired: false, ignoredApproval: false, sleeping: false }
             var hostStateTuple = React.useState(hostState0)
             var hostState = hostStateTuple[0]
             var setHostState = hostStateTuple[1]
@@ -248,10 +248,13 @@ window.__ModuleLoader__.load({
                       // 首次从 host 拿到 cfg 时把 turn_flash_ms 同步到本地
                       if (s.cfg && typeof s.cfg.turn_flash_ms === 'number') TURN_FLASH_MS = s.cfg.turn_flash_ms
                       var applied = false
+                      var nextRev = s.rev || 0
                       setHostState(function (prev) {
-                        if (prev.running === !!s.running && prev.phase === (s.phase || 'wait') && prev.approvalPending === !!s.approvalPending && prev.lastApproval === s.lastApproval && prev.lastApprovalAt === s.lastApprovalAt && prev.turnFlash === s.turnFlash && prev.turnFlashAt === s.turnFlashAt && prev.locked === (s.locked || null) && prev.surprisedUntil === (s.surprisedUntil || 0) && prev.cryingUntil === (s.cryingUntil || 0) && prev.admirableUntil === (s.admirableUntil || 0) && prev.waitingAnswer === !!s.waitingAnswer && prev.beggingUntil === (s.beggingUntil || 0) && prev.compacting === !!s.compacting && prev.tired === !!s.tired && prev.ignoredApproval === !!s.ignoredApproval && prev.sleeping === !!s.sleeping) return prev
+                        // 单数字 diff：host 给出的 rev 即可代表整个 state 快照
+                        if (prev.rev === nextRev) return prev
                         applied = true
                         return {
+                          rev: nextRev,
                           running: !!s.running,
                           phase: s.phase || 'wait',
                           approvalPending: !!s.approvalPending,

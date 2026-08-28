@@ -377,3 +377,25 @@ console.log('smoke: all assertions passed (' + routes.length + ' route, ' + even
   await call('/dsh-taffy-mood/api/action?action=lock', { method: 'POST' })
   console.log('csrf: pass (POST-only + Origin 校验)')
 }
+
+// —— rev 单调递增（client 单数字 diff 依赖）—— //
+{
+  const before = JSON.parse((await call('/dsh-taffy-mood/api/state')).body).state.rev
+  emit({ type: 'tool/call', data: { callId: 'rev-1', name: 'tavvy-rev', arguments: '{}' } })
+  const afterCall = JSON.parse((await call('/dsh-taffy-mood/api/state')).body).state.rev
+  assert.equal(typeof before, 'number', 'rev 应为数字')
+  assert.ok(afterCall > before, '事件后 rev 应递增：before=' + before + ' after=' + afterCall)
+  // lock action 也应递增
+  const beforeLock = JSON.parse((await call('/dsh-taffy-mood/api/state', { method: 'POST' })).body).state.rev
+  // unlocked → 已 done in earlier CSRF block; do an actual lock change
+  await call('/dsh-taffy-mood/api/action?action=lock&mood=tired', { method: 'POST' })
+  const afterLock = JSON.parse((await call('/dsh-taffy-mood/api/state')).body).state.rev
+  assert.ok(afterLock > beforeLock, 'lock action 后 rev 递增')
+  // 同样的 lock 重复设相同值不应递增（防无谓 client 刷新）
+  await call('/dsh-taffy-mood/api/action?action=lock&mood=tired', { method: 'POST' })
+  const afterSameLock = JSON.parse((await call('/dsh-taffy-mood/api/state')).body).state.rev
+  assert.equal(afterSameLock, afterLock, '同值 lock 不应递增')
+  // 清理
+  await call('/dsh-taffy-mood/api/action?action=lock', { method: 'POST' })
+  console.log('rev: pass (单数字 diff 正确递增)')
+}

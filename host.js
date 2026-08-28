@@ -110,6 +110,8 @@ export async function apply(ctx, config) {
     approvalFirstAskedAt: 0,
     // 休眠：最近一次会话活动时刻，超阈值且无更高状态时切静态图省解码
     lastActivityAt: Date.now(),
+    // 单调递增版本号：任何可观察的状态变更都 +1；client 用它做单数字 diff
+    rev: 0,
   }
   const TIRED_AFTER_MS = cfg.tired_after_ms
   const IGNORED_AFTER_MS = cfg.ignored_after_ms
@@ -133,9 +135,10 @@ export async function apply(ctx, config) {
     }
   }
 
-  ctx.effect(() => ctx.on('session/event', (session, event) => {
-    if (!event || typeof event.type !== 'string') return
-    // 任何会话活动都算"醒着"（chunk 高频但只是一次赋值，代价可忽略）
+  ctx.effect(() => {
+    const inner = (session, event) => {
+      if (!event || typeof event.type !== 'string') return
+      // 任何会话活动都算"醒着"（chunk 高频但只是一次赋值，代价可忽略）
     state.lastActivityAt = Date.now()
     const sid = sessionIdOf(session)
     if (event.type === 'assistant/chunk') {
@@ -248,7 +251,13 @@ export async function apply(ctx, config) {
       state.turnToolCalls = 0
       return
     }
-  }))
+    }  // 关闭 inner handler
+    // 包装层：每次事件后 rev++（含 lastActivityAt 变更，client 必能观测到）
+    return ctx.on('session/event', (session, event) => {
+      inner(session, event)
+      state.rev += 1
+    })
+  })
 
   const snapshot = () => {
     let phase = 'wait'
@@ -274,6 +283,7 @@ export async function apply(ctx, config) {
       sleeping: Date.now() - state.lastActivityAt > SLEEP_AFTER_MS,
       // 把阈值透传给 client，client 可派生自己需要的窗口（目前只取 turn_flash_ms）
       cfg: { turn_flash_ms: cfg.turn_flash_ms },
+      rev: state.rev,
     }
   }
 
@@ -281,10 +291,12 @@ export async function apply(ctx, config) {
     switch (action) {
       case 'lock':
         if (moodValue === null || moodValue === undefined || moodValue === '') {
+          if (state.locked !== null) state.rev += 1
           state.locked = null
           return { ok: true, locked: null }
         }
         if (typeof moodValue === 'string' && lockable.has(moodValue)) {
+          if (state.locked !== moodValue) state.rev += 1
           state.locked = moodValue
           return { ok: true, locked: state.locked }
         }
