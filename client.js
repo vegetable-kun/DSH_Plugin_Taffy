@@ -12,6 +12,8 @@ window.__ModuleLoader__.load({
     var SETTINGS_KEY = 'dsh-taffy-mood/settings'
     var API_BASE = '/dsh-taffy-mood/api'
     var ASSET_BASE = '/dsh-taffy-mood/assets/'
+    // turn_flash 窗口时长：默认 5 秒；首次拿到 host snapshot.cfg 后被覆盖
+    var TURN_FLASH_MS = 5000
 
     var mood = {
       typing: false,
@@ -117,9 +119,19 @@ window.__ModuleLoader__.load({
       const res = await fetch(API_BASE + path)
       return res.json()
     }
+    // 写动作走 POST；POST + text/plain 走简单请求路径，跨源会被浏览器预检拦掉
+    // 同源 POST 携带 Origin: <同源>，被 host 的 Origin 校验放过
+    async function postAction(action, query) {
+      const qs = query ? '?' + query : ''
+      const res = await fetch(API_BASE + '/action' + qs, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+      })
+      return res.json()
+    }
     function act(action, query) {
-      var qs = '?action=' + encodeURIComponent(action) + (query ? '&' + query : '')
-      return api('/action' + qs)
+      var qs = query ? query : ''
+      return postAction(action, qs)
     }
     // 轮询节奏：活跃时 300ms（更跟手），无任何活跃态时 2s（够抓审批弹窗/host 变化）
     var POLL_ACTIVE_MS = 300
@@ -155,7 +167,7 @@ window.__ModuleLoader__.load({
                 mood.typing = typing
                 if (typing && !wasTyping && mood.rejected) {
                   mood.rejected = false
-                  fetch(API_BASE + '/action?action=clear-rejected').catch(function () {})
+                  postAction('clear-rejected').catch(function () {})
                 }
                 publish()
               }
@@ -202,7 +214,7 @@ window.__ModuleLoader__.load({
                 if (s.cryingUntil > t && s.cryingUntil < due) due = s.cryingUntil
                 if (s.admirableUntil > t && s.admirableUntil < due) due = s.admirableUntil
                 if (s.beggingUntil > t && s.beggingUntil < due) due = s.beggingUntil
-                var flashEnd = s.turnFlashAt + 5000
+                var flashEnd = s.turnFlashAt + TURN_FLASH_MS
                 if (s.turnFlash !== null && s.turnFlashAt > 0 && flashEnd > t && flashEnd < due) due = flashEnd
                 var greetEnd = greetUntil
                 if (greetEnd > t && greetEnd < due) due = greetEnd
@@ -216,6 +228,8 @@ window.__ModuleLoader__.load({
                     if (!alive) return
                     if (r && r.state) {
                       var s = r.state
+                      // 首次从 host 拿到 cfg 时把 turn_flash_ms 同步到本地
+                      if (s.cfg && typeof s.cfg.turn_flash_ms === 'number') TURN_FLASH_MS = s.cfg.turn_flash_ms
                       var applied = false
                       setHostState(function (prev) {
                         if (prev.running === !!s.running && prev.phase === (s.phase || 'wait') && prev.approvalPending === !!s.approvalPending && prev.lastApproval === s.lastApproval && prev.lastApprovalAt === s.lastApprovalAt && prev.turnFlash === s.turnFlash && prev.turnFlashAt === s.turnFlashAt && prev.locked === (s.locked || null) && prev.surprisedUntil === (s.surprisedUntil || 0) && prev.cryingUntil === (s.cryingUntil || 0) && prev.admirableUntil === (s.admirableUntil || 0) && prev.waitingAnswer === !!s.waitingAnswer && prev.beggingUntil === (s.beggingUntil || 0) && prev.compacting === !!s.compacting && prev.tired === !!s.tired && prev.ignoredApproval === !!s.ignoredApproval && prev.sleeping === !!s.sleeping) return prev
@@ -324,7 +338,7 @@ window.__ModuleLoader__.load({
             } else if (hostState.cryingUntil > now) {
               src = GIFS.cry
               alt = '被阻塞了…'
-            } else if (hostState.turnFlash !== null && now - hostState.turnFlashAt < 5000) {
+            } else if (hostState.turnFlash !== null && now - hostState.turnFlashAt < TURN_FLASH_MS) {
               if (hostState.turnFlash === 'aborted') {
                 src = GIFS.angry
                 alt = '用户中止'

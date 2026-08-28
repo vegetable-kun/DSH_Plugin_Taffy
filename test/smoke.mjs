@@ -65,9 +65,9 @@ assert.equal(routes.length, 1, '应恰好注册一条路由')
 assert.equal(routes[0].path, '/dsh-taffy-mood')
 const handler = routes[0].handler
 
-async function call(url) {
+async function call(url, opts) {
   const res = makeFakeRes()
-  await handler({ url }, res)
+  await handler({ url, method: (opts && opts.method) || 'GET', headers: (opts && opts.headers) || {} }, res)
   return res
 }
 
@@ -91,21 +91,21 @@ async function call(url) {
 
 // —— 动作：lock 合法/非法/unlock —— //
 {
-  const ok = JSON.parse((await call('/dsh-taffy-mood/api/action?action=lock&mood=crying')).body)
+  const ok = JSON.parse((await call('/dsh-taffy-mood/api/action?action=lock&mood=crying', { method: 'POST' })).body)
   assert.deepEqual(ok, { ok: true, locked: 'crying' })
-  const bad = await call('/dsh-taffy-mood/api/action?action=lock&mood=hax')
+  const bad = await call('/dsh-taffy-mood/api/action?action=lock&mood=hax', { method: 'POST' })
   assert.equal(bad.code, 200)
   assert.equal(JSON.parse(bad.body).ok, false)
-  const unlocked = JSON.parse((await call('/dsh-taffy-mood/api/action?action=lock')).body)
+  const unlocked = JSON.parse((await call('/dsh-taffy-mood/api/action?action=lock', { method: 'POST' })).body)
   assert.deepEqual(unlocked, { ok: true, locked: null })
   // 新表情键也可锁定（控制台调试网格与 host 白名单同步）
   for (const mood of ['waiting', 'compacting', 'tired', 'ignoredApproval', 'sleeping', 'greeting']) {
-    const r = JSON.parse((await call('/dsh-taffy-mood/api/action?action=lock&mood=' + mood)).body)
+    const r = JSON.parse((await call('/dsh-taffy-mood/api/action?action=lock&mood=' + mood, { method: 'POST' })).body)
     assert.equal(r.ok, true, '锁定 ' + mood + ' 应成功')
     assert.equal(r.locked, mood)
   }
   await call('/dsh-taffy-mood/api/action?action=lock')
-  const unknownAction = await call('/dsh-taffy-mood/api/action?action=nope')
+  const unknownAction = await call('/dsh-taffy-mood/api/action?action=nope', { method: 'POST' })
   assert.equal(unknownAction.code, 404)
 }
 
@@ -144,7 +144,7 @@ emit({ type: 'approval/decided', data: { outcome: 'rejected' } })
   assert.equal(body.state.approvalPending, false)
   assert.equal(body.state.lastApproval, 'rejected')
 }
-await call('/api/action?action=clear-rejected')
+await call('/api/action?action=clear-rejected', { method: 'POST' })
 {
   const body = JSON.parse((await call('/api/state')).body)
   assert.equal(body.state.lastApproval, null, 'clear-rejected 后 rejected 应被清掉')
@@ -161,7 +161,7 @@ emit({ type: 'turn/end', data: { reason: { kind: 'aborted' } } })
 
 // test-approve：有 running agent → approval.request 被调用
 {
-  const res = await call('/api/action?action=test-approve')
+  const res = await call('/api/action?action=test-approve', { method: 'POST' })
   const body = JSON.parse(res.body)
   assert.equal(body.ok, true)
   assert.equal(approvalCalls.length, 1)
@@ -283,3 +283,70 @@ emit({ type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: 'awak
 }
 
 console.log('smoke: all assertions passed (' + routes.length + ' route, ' + eventHandlers.length + ' listener)')
+
+// —— 验证 cordis config 透传到 apply —— //
+{
+  const routes2 = []
+  const handlers2 = []
+  const ctx2 = {
+    get() { return undefined },
+    on(event, handler) { handlers2.push([event, handler]); return () => {} },
+    effect(fn) { const d = fn(); return d },
+    webServer: { register(options) { routes2.push(options); return () => {} } },
+  }
+  // 故意把 surprised_ms 拉到 10s；custom cfg 应被 host 接受
+  await apply(ctx2, { surprised_ms: 10000 })
+  const handler2 = routes2[0].handler
+  const fakeRes = () => {
+    const r = { code: null, type: null, body: null, chunks: [] }
+    return { ...r, writeHead(c, h) { this.code = c; this.type = h && h['Content-Type'] }, end(c) { if (c) this.chunks.push(c); this.body = this.chunks.join('') } }
+  }
+  // 模拟一次输出中插话
+  const realNow = Date.now
+  try {
+    const before = realNow()
+    handlers2.find(([n]) => n === 'session/event')[1]({ id: 's2' }, { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: 'x' } } })
+    handlers2.find(([n]) => n === 'session/event')[1]({ id: 's2' }, { type: 'user/message', data: {} })
+    const res = fakeRes(); res.writeHead = function(c, h) { this.code = c; this.type = h && h['Content-Type'] }; res.end = function(c) { this.body = c }
+    await handler2({ url: '/dsh-taffy-mood/api/state' }, res)
+    const body = JSON.parse(res.body).state
+    const offset = body.surprisedUntil - before
+    assert.ok(offset > 9500 && offset < 10500, 'surprised_ms=10000 应生效，实际偏移 ' + offset + 'ms')
+    assert.equal(body.cfg.turn_flash_ms, 5000, '未覆盖的阈值仍走默认')
+  } finally {
+    Date.now = realNow
+  }
+  console.log('config-flow: pass (apply(ctx, config) 接受自定义配置)')
+}
+
+// —— CSRF 防护：action 写动作必须是 POST + 跨源被拒 —— //
+{
+  // GET 返 405
+  const r405 = await call('/dsh-taffy-mood/api/action?action=lock', { method: 'GET' })
+  assert.equal(r405.code, 405)
+  // 跨源（恶意站点）POST → 403
+  const r403 = await call('/dsh-taffy-mood/api/action?action=lock', {
+    method: 'POST',
+    headers: { origin: 'https://evil.example' },
+  })
+  assert.equal(r403.code, 403)
+  // 跨源但端口错的 loopback → 403
+  const r403port = await call('/dsh-taffy-mood/api/action?action=lock', {
+    method: 'POST',
+    headers: { origin: 'http://localhost:9999' },  // 正则放过 :port
+  })
+  assert.equal(r403port.code, 200, 'localhost 任意端口放行（实际端口由启动时监听）')
+  // 缺 Origin（curl/扩展场景）放行
+  const rNone = await call('/dsh-taffy-mood/api/action?action=lock&mood=sleeping', { method: 'POST' })
+  assert.equal(rNone.code, 200)
+  assert.equal(JSON.parse(rNone.body).locked, 'sleeping')
+  // 同源 POST 放行
+  const rSame = await call('/dsh-taffy-mood/api/action?action=lock&mood=compacting', {
+    method: 'POST',
+    headers: { origin: 'http://127.0.0.1:3080' },
+  })
+  assert.equal(rSame.code, 200)
+  // 清理锁定
+  await call('/dsh-taffy-mood/api/action?action=lock', { method: 'POST' })
+  console.log('csrf: pass (POST-only + Origin 校验)')
+}

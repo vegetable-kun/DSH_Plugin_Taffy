@@ -54,6 +54,22 @@ dsh plugin --profile web remove dsh-taffy-mood   # 从 profile 移除
 # 或在设置页关闭「启用表情」临时隐藏
 ```
 
+## 配置
+
+阈值可在 `~/.dsh/profiles/web/cordis.patch.yml` 里给 `dsh-taffy-mood` 行追加 `config` 字段（蛇形命名，只传想改的）：
+
+```yaml
+- id: dsh-taffy-mood
+  config:
+    surprised_ms: 6000          # 插话惊讶 6 秒（默认 4000）
+    ignored_after_ms: 60000     # 审批没人理 60 秒（默认 30000）
+    sleep_after_ms: 600000      # 休眠 10 分钟（默认 600000）
+    tired_after_ms: 300000      # 长任务疲惫 5 分钟（默认 180000）
+    # turn_flash_ms / crying_ms / admirable_ms / begging_window_ms / begging_show_ms / compacting_failsafe_ms 同理
+```
+
+未列出的字段保持原默认值；非法值（负数、非数字）会被 host 忽略并回退到默认。
+
 ## 结构与技术要点
 
 ```
@@ -67,8 +83,11 @@ test/smoke.mjs     冒烟测试：node test/smoke.mjs
 
 - Host 通过 `ctx.on('session/event')` 审计日志事件驱动状态机（`approval/*`、`tool/*`、`turn/end`、`assistant/chunk`、`user/message`）；运行检测直接扫描 agents 注册表（事件计数会漏掉激活前已 running 的 agent）
 - 浏览器半边经 `/dsh-taffy-mood/api/state` 轮询状态、`/api/action` 提交动作（lock / clear-rejected / test-approve），素材经 `/dsh-taffy-mood/assets/*` 白名单路由提供并内存缓存
+- 写动作严格 POST-only + Origin 校验（仅放行 `127.0.0.1`/`localhost` loopback 与缺 Origin 的本地工具），防止跨源页面通过 `<img>` 触发审批弹卡
+- 轮询节奏按需调度：活跃状态 300ms 跟手，空闲 2s 兜底，时间态到期精确触发
 - 插话判定 = 工具执行中或 2.5 秒内有 chunk，避免新轮次启动瞬间的时序误报
 - 打字检测用官方 `conversation.composer.dock` InputZone 的 `props.input.draft`
+- 阈值可通过 `~/.dsh/profiles/web/cordis.patch.yml` 覆盖（`config:` 字段，蛇形命名），如 `surprised_ms: 6000` / `sleep_after_ms: 600000`
 - 无构建步骤、无 npm 依赖：纯 ESM host + ModuleLoader 包装 client，clone 即源码即产物
 
 有问题欢迎投issue和pr,喜欢就点个免费的star吧

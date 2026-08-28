@@ -38,7 +38,27 @@ const ASSET_TYPES = new Map([
   ['taffy-underwear.jpg', 'image/jpeg'],
 ])
 
-export async function apply(ctx) {
+export async function apply(ctx, config) {
+  // 阈值可由 cordis.patch.yml 的 config 字段覆盖（snake_case + 默认兜底）
+  // 字段对应见 README；未传保持原默认值不变
+  const cfg = {
+    surprised_ms: 4000,
+    turn_flash_ms: 5000,
+    crying_ms: 6000,
+    admirable_ms: 4000,
+    begging_window_ms: 60000,
+    begging_show_ms: 5000,
+    compacting_failsafe_ms: 90000,
+    tired_after_ms: 3 * 60 * 1000,
+    ignored_after_ms: 30 * 1000,
+    sleep_after_ms: 10 * 60 * 1000,
+  }
+  if (config && typeof config === 'object') {
+    for (const k of Object.keys(cfg)) {
+      const v = config[k]
+      if (typeof v === 'number' && v > 0) cfg[k] = v
+    }
+  }
   const cache = new Map()
   const state = {
     approvalPending: 0,
@@ -70,9 +90,9 @@ export async function apply(ctx) {
     // 休眠：最近一次会话活动时刻，超阈值且无更高状态时切静态图省解码
     lastActivityAt: Date.now(),
   }
-  const TIRED_AFTER_MS = 3 * 60 * 1000
-  const IGNORED_AFTER_MS = 30 * 1000
-  const SLEEP_AFTER_MS = 10 * 60 * 1000
+  const TIRED_AFTER_MS = cfg.tired_after_ms
+  const IGNORED_AFTER_MS = cfg.ignored_after_ms
+  const SLEEP_AFTER_MS = cfg.sleep_after_ms
   const lockable = new Set(['idle', 'thinking', 'tool', 'hacker', 'celebrate', 'rejected', 'angry', 'suicide', 'surprised', 'crying', 'begging', 'admirable', 'fake_crying', 'waiting', 'compacting', 'tired', 'ignoredApproval', 'sleeping', 'greeting'])
 
   const sessionIdOf = (session) => {
@@ -132,7 +152,7 @@ export async function apply(ctx) {
       // 插话判定：模型真的在输出/干活才算；新轮次刚启动两者皆为否，
       // 普通发消息不会误报。
       const busy = state.toolActive > 0 || Date.now() - state.lastChunkAt < 2500
-      if (busy) state.surprisedUntil = Date.now() + 4000
+      if (busy) state.surprisedUntil = Date.now() + cfg.surprised_ms
       return
     }
     if (event.type === 'approval/asked') {
@@ -141,13 +161,13 @@ export async function apply(ctx) {
       if (sid) state.approvalSessionId = sid
       const t = Date.now()
       // 60 秒内第二次请求 → 5 秒求饶窗口；时间盒过期自动回落 fork，不会卡死。
-      if (t - state.lastAskedAt < 60000) state.beggingUntil = t + 5000
+      if (t - state.lastAskedAt < cfg.begging_window_ms) state.beggingUntil = t + cfg.begging_show_ms
       state.lastAskedAt = t
       return
     }
     if (event.type === 'compaction/start') {
       // 时间戳含 90 秒兜底：end 丢失也不会永久卡在压缩表情上。
-      state.compactingUntil = Date.now() + 90000
+      state.compactingUntil = Date.now() + cfg.compacting_failsafe_ms
       return
     }
     if (event.type === 'compaction/end' || event.type === 'compaction/summary' || event.type === 'compaction/prune') {
@@ -200,9 +220,9 @@ export async function apply(ctx) {
         state.turnFlash = kind
         state.turnFlashAt = Date.now()
       } else if (kind === 'blocked') {
-        state.cryingUntil = Date.now() + 6000
+        state.cryingUntil = Date.now() + cfg.crying_ms
       } else if (kind === 'completed' && state.turnToolCalls >= 5) {
-        state.admirableUntil = Date.now() + 4000
+        state.admirableUntil = Date.now() + cfg.admirable_ms
       }
       state.turnToolCalls = 0
       return
@@ -237,6 +257,8 @@ export async function apply(ctx) {
       tired: state.turnStartedAt > 0 && Date.now() - state.turnStartedAt > TIRED_AFTER_MS,
       ignoredApproval: state.approvalPending > 0 && state.approvalFirstAskedAt > 0 && Date.now() - state.approvalFirstAskedAt > IGNORED_AFTER_MS,
       sleeping: Date.now() - state.lastActivityAt > SLEEP_AFTER_MS,
+      // 把阈值透传给 client，client 可派生自己需要的窗口（目前只取 turn_flash_ms）
+      cfg: { turn_flash_ms: cfg.turn_flash_ms },
     }
   }
 
@@ -301,6 +323,23 @@ export async function apply(ctx) {
           return
         }
         if (path === '/api/action') {
+          // CSRF 防护：写动作严格 POST-only + Origin 校验
+          const method = String(req.method || 'GET').toUpperCase()
+          if (method !== 'POST') {
+            res.writeHead(405, { 'Content-Type': 'text/plain', Allow: 'POST' })
+            res.end('method not allowed')
+            return
+          }
+          const origin = req.headers && req.headers.origin
+          // Origin 缺省（curl/扩展）放行；非缺省时必须匹配 loopback
+          if (origin !== undefined && origin !== null) {
+            const okOrigin = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin)
+            if (!okOrigin) {
+              res.writeHead(403, { 'Content-Type': 'text/plain' })
+              res.end('origin not allowed')
+              return
+            }
+          }
           const result = await runAction(url.searchParams.get('action'), url.searchParams.get('mood'))
           if (result === null) {
             res.writeHead(404, { 'Content-Type': 'text/plain' })
