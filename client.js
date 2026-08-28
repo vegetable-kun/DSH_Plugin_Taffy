@@ -15,6 +15,98 @@ window.__ModuleLoader__.load({
     // turn_flash 窗口时长：默认 5 秒；首次拿到 host snapshot.cfg 后被覆盖
     var TURN_FLASH_MS = 5000
 
+    // ===== 今日状态时长统计 =====
+    var STATS_KEY = 'dsh-taffy-mood/stats'
+    // 5 个分类：工作中 / 审批 / 顺利 / 卡顿 / 意外
+    // host 字段 → 桶的映射（按优先级匹配；放前面的胜出）
+    var STATS_BUCKETS = [
+      { key: 'surprised', label: '意外',  emoji: '😮', match: function (s) { return s.surprisedUntil > Date.now() } },
+      { key: 'blocked',   label: '卡顿',  emoji: '😣', match: function (s) { return s.ignoredApproval || s.cryingUntil > Date.now() || (s.turnFlash && (s.turnFlash === 'aborted' || s.turnFlash === 'error' || s.turnFlash === 'max-tokens') && Date.now() - s.turnFlashAt < 5000) || s.locked === 'angry' || s.locked === 'suicide' || s.locked === 'fake_crying' } },
+      { key: 'proud',     label: '顺利',  emoji: '✨', match: function (s) { return s.admirableUntil > Date.now() || s.locked === 'admirable' } },
+      { key: 'approval',  label: '审批',  emoji: '🍴', match: function (s) { return s.approvalPending || s.beggingUntil > Date.now() || s.ignoredApproval || s.locked === 'begging' } },
+      { key: 'working',   label: '工作中', emoji: '🛠', match: function (s) { return s.running || s.locked === 'hacker' || s.locked === 'thinking' || s.locked === 'tool' } },
+    ]
+    var statsListeners = new Set()
+    function notifyStats() { statsListeners.forEach(function (fn) { fn() }) }
+    // 5 分钟没活动 = 归入闲置（不显式 bucket，但停累加，节省反复切换）
+    var stats = null  // 惰性 init 在 apply 内
+    function todayIso() { var d = new Date(); return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate() }
+    function loadStats() {
+      var buckets = { working: 0, approval: 0, proud: 0, blocked: 0, surprised: 0 }
+      try {
+        var raw = window.localStorage.getItem(STATS_KEY)
+        if (raw) {
+          var c = JSON.parse(raw)
+          if (c && c.date === todayIso() && c.buckets) {
+            for (var k in buckets) if (typeof c.buckets[k] === 'number' && c.buckets[k] > 0) buckets[k] = c.buckets[k]
+            return { date: c.date, segStart: Date.now(), current: c.current || null, buckets: buckets, currentTotal: c.currentTotal || 0 }
+          }
+        }
+      } catch (eStatsLoad) { /* 损坏的本地统计按今日默认值处理 */ }
+      return { date: todayIso(), segStart: Date.now(), current: null, buckets: buckets, currentTotal: 0 }
+    }
+    var saveStatsTimer = null
+    function saveStatsNow() {
+      saveStatsTimer = null
+      try { window.localStorage.setItem(STATS_KEY, JSON.stringify(stats)) } catch (eStatsSave) { /* 隐私模式等写不进就放弃 */ }
+    }
+    function scheduleSaveStats() {
+      if (saveStatsTimer !== null) return
+      saveStatsTimer = setTimeout(saveStatsNow, 5000)
+    }
+    // 把 hostState 投影到 5 个桶之一；null 表示"无业务活动"（不计）
+    function classify(s) {
+      if (!s) return null
+      for (var i = 0; i < STATS_BUCKETS.length; i += 1) {
+        if (STATS_BUCKETS[i].match(s)) return STATS_BUCKETS[i].key
+      }
+      return null
+    }
+    // 状态可能变化时调用：关闭旧段、开启新段
+    function tickStats(s) {
+      if (!stats) return
+      var now = Date.now()
+      var b = classify(s)
+      if (stats.current && b === stats.current) {
+        // 还在同一桶：啥也不做，currentTotal 在切换时才结算
+        return
+      }
+      // 切段：把当前在累的 currentTotal 并入旧桶
+      if (stats.current && stats.currentTotal > 0) {
+        var seg = now - stats.segStart
+        if (seg > 0 && seg < 24 * 60 * 60 * 1000) {  // 防异常：>24h 视为未运行
+          if (typeof stats.buckets[stats.current] !== 'number') stats.buckets[stats.current] = 0
+          stats.buckets[stats.current] += seg
+        }
+      }
+      stats.segStart = now
+      stats.current = b
+      stats.currentTotal = 0
+      scheduleSaveStats()
+    }
+    function formatDuration(ms) {
+      if (!ms || ms < 0) return '0s'
+      var s = Math.floor(ms / 1000)
+      var h = Math.floor(s / 3600)
+      var m = Math.floor((s % 3600) / 60)
+      var sec = s % 60
+      if (h > 0) return h + 'h ' + m + 'm'
+      if (m > 0) return m + 'm ' + sec + 's'
+      return sec + 's'
+    }
+    // 获取实时 bucket 视图：b 包含 currentTotal 当前段（从 segStart 到现在）
+    function liveBuckets() {
+      if (!stats) return { working: 0, approval: 0, proud: 0, blocked: 0, surprised: 0 }
+      var out = {}
+      var now = Date.now()
+      for (var k in stats.buckets) out[k] = stats.buckets[k] || 0
+      if (stats.current && now - stats.segStart > 0 && now - stats.segStart < 24 * 60 * 60 * 1000) {
+        if (typeof out[stats.current] !== 'number') out[stats.current] = 0
+        out[stats.current] += now - stats.segStart
+      }
+      return out
+    }
+
     var mood = {
       typing: false,
       rejected: false,
@@ -163,6 +255,7 @@ window.__ModuleLoader__.load({
 
     async function apply(ctx) {
       loadSettings()
+      stats = loadStats()
       await loadAssetIndex()  // 拿到带哈希的 url 后再注册 UI，避免首次预加载走老 URL
       var slots = ctx.get('slots')
       if (slots === undefined) return
@@ -247,6 +340,9 @@ window.__ModuleLoader__.load({
                       var s = r.state
                       // 首次从 host 拿到 cfg 时把 turn_flash_ms 同步到本地
                       if (s.cfg && typeof s.cfg.turn_flash_ms === 'number') TURN_FLASH_MS = s.cfg.turn_flash_ms
+                      // 累计今日各状态时长；即使 rev 未变化，时间态字段（surprisedUntil
+                      // 等）也可能让桶改变，所以每次 fetch 后都查一次
+                      tickStats(s)
                       var applied = false
                       var nextRev = s.rev || 0
                       setHostState(function (prev) {
@@ -288,6 +384,12 @@ window.__ModuleLoader__.load({
                     await delay(POLL_IDLE_MS)
                   }
                   notify()
+                  // 跨零点检测：日切换时把 buckets 重置（保留当前正在累的段归零）
+                  if (stats && stats.date !== todayIso()) {
+                    stats = { date: todayIso(), segStart: Date.now(), current: null, buckets: { working: 0, approval: 0, proud: 0, blocked: 0, surprised: 0 }, currentTotal: 0 }
+                    saveStatsNow()
+                  }
+                  notifyStats()
                 }
               }
               loop()
@@ -550,6 +652,14 @@ window.__ModuleLoader__.load({
           function () {
             var forceTuple = React.useState(0)
             var rerender = function () { forceTuple[1](function (n) { return n + 1 }) }
+            var statsTickTuple = React.useState(0)
+            var statsTick = statsTickTuple[0]
+            var bumpStats = statsTickTuple[1]
+            React.useEffect(function () {
+              var fn = function () { bumpStats(function (n) { return n + 1 }) }
+              statsListeners.add(fn)
+              return function () { statsListeners.delete(fn) }
+            }, [])
             var row = function (labelText, hint, control) {
               return React.createElement('div', { className: 'taffy-set-row' },
                 React.createElement('div', null,
@@ -566,6 +676,32 @@ window.__ModuleLoader__.load({
                 React.createElement('input', { className: 'taffy-set-input', type: 'range', min: 30, max: 100, step: 5, value: Math.round(mood.opacity * 100), onChange: function (e) { mood.opacity = Number(e.target.value) / 100; scheduleSave(); rerender() } })),
               row('鼠标穿透', '开启后点击会穿过表情（拖动和中键需先关闭）',
                 React.createElement('input', { type: 'checkbox', checked: mood.passThrough, onChange: function (e) { mood.passThrough = e.target.checked; publish(); scheduleSave(); rerender() } }))
+            )
+            React.createElement('div', { style: { marginTop: 24, paddingTop: 16, borderTop: '1px solid rgba(128,128,128,.25)' } },
+              React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 } },
+                React.createElement('div', { className: 'taffy-set-label' }, '今日统计 · ' + stats.date),
+                React.createElement('button', {
+                  onClick: function () {
+                    if (window.confirm('清空今日统计？')) {
+                      stats = { date: todayIso(), segStart: Date.now(), current: stats.current, buckets: { working: 0, approval: 0, proud: 0, blocked: 0, surprised: 0 }, currentTotal: 0 }
+                      saveStatsNow()
+                      notifyStats()
+                    }
+                  },
+                  style: { fontSize: 11, padding: '2px 8px', border: '1px solid rgba(128,128,128,.3)', borderRadius: 4, background: 'transparent', color: 'inherit', cursor: 'pointer' },
+                }, '重置')),
+              (function () {
+                var live = liveBuckets()
+                return React.createElement('div', { key: statsTick },
+                  React.createElement('div', { style: { fontSize: 11, opacity: 0.65, marginBottom: 8 } }, '本地累计 · 跨零点自动归零'),
+                  STATS_BUCKETS.map(function (b) {
+                    return React.createElement('div', { key: b.key, style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 0', fontSize: 13 } },
+                      React.createElement('span', null, b.emoji + ' ' + b.label),
+                      React.createElement('span', { style: { fontVariantNumeric: 'tabular-nums' } }, formatDuration(live[b.key] || 0))
+                    )
+                  })
+                )
+              })()
             )
           }
         )
@@ -652,7 +788,22 @@ window.__ModuleLoader__.load({
           clearTimeout(saveTimer)
           saveNow()
         }
+        // 关闭时把当前在累的段并入桶并立即落盘
+        if (stats && stats.current) {
+          var seg = Date.now() - stats.segStart
+          if (seg > 0 && seg < 24 * 60 * 60 * 1000) {
+            if (typeof stats.buckets[stats.current] !== 'number') stats.buckets[stats.current] = 0
+            stats.buckets[stats.current] += seg
+            stats.segStart = Date.now()
+            stats.currentTotal = 0
+          }
+        }
+        if (saveStatsTimer !== null) {
+          clearTimeout(saveStatsTimer)
+          saveStatsNow()
+        }
         listeners.clear()
+        statsListeners.clear()
       }
     }
 
