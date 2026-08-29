@@ -1,5 +1,7 @@
 # taffy-mood — DeepSeek Harness 表情包状态机插件
 
+中文简体 | [English](README.en.md)
+
 这是一个 dsh 的插件，把 Taffy 表情包挂在 DeepSeek Harness Web UI 右下角，随 agent 状态自动切换：待审批、思考中、干活中、出错、被打断……全部有专属表情。标准 DSH 插件包（bundle + web client），素材随包分发，一条命令安装。
 
 ![taffy](assets/taffy-fork.gif)
@@ -11,6 +13,9 @@ dsh plugin --profile web add github:vegetable-kun/DSH_Plugin_Taffy
 ```
 
 然后重启 `dsh web` 即生效。安装器会自动把包加进 profile 的 bundles 层列表，无需手动编辑任何配置。
+
+<details>
+<summary><b>效果预览（点击展开）</b></summary>
 
 ## 效果预览
 
@@ -39,6 +44,8 @@ dsh plugin --profile web add github:vegetable-kun/DSH_Plugin_Taffy
 | 开机问候 | `tafei` 静态图 | 页面加载后首屏打招呼 2 秒，不遮蔽任何业务状态 |
 
 优先级链：锁定 > 求饶(时间盒) > 等你回答 > 记忆压缩 > 审批没人理 > 待审批 > 批准庆祝 > 惊讶 > 哭 > 中止/出错/假哭闪帧 > 得意 > 长任务疲惫 > 运行中(黑客/思考/工具) > 打字 > 开机问候(2秒) > 休眠 > 闲置。所有新状态都有明确出口：求饶是时间盒、等你回答由回答消息/结果配对/轮次结束三路清除、压缩由 end 事件加兜底超时双保险、疲惫与没人理由时间阈值动态推导并随轮次/决定自动消失，均不会阻塞下层状态。
+
+</details>
 
 ## 使用
 
