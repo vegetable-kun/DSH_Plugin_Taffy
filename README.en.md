@@ -17,7 +17,7 @@ Then restart `dsh web`. The installer auto-registers the package in your profile
 <details>
 <summary><b>Mood reference (click to expand)</b></summary>
 
-## Mood reference
+## Mood description
 
 | Mood | Asset | Trigger |
 |---|---|---|
