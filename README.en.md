@@ -15,7 +15,7 @@ dsh plugin --profile web add github:vegetable-kun/DSH_Plugin_Taffy
 Then restart `dsh web`. The installer auto-registers the package in your profile's bundle list — no manual config needed.
 
 <details>
-<summary><b>Mood reference (click to expand)</b></summary>
+<summary><b>Mood description (click to expand)</b></summary>
 
 ## Mood description
 
