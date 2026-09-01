@@ -15,7 +15,7 @@ dsh plugin --profile web add github:vegetable-kun/DSH_Plugin_Taffy
 然后重启 `dsh web` 即生效。安装器会自动把包加进 profile 的 bundles 层列表，无需手动编辑任何配置。
 
 <details>
-<summary><b>效果预览（点击展开）</b></summary>
+<summary><b>效果详细说明（点击展开）</b></summary>
 
 ## 效果详细说明
 
