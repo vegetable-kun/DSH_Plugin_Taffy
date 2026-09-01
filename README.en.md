@@ -4,7 +4,7 @@
 
 A standard DSH plugin that pins a Taffy mood mascot in the bottom-right corner of the DeepSeek Harness Web UI. The GIF reacts live to agent state — approval pending, thinking, tool runs, interrupts, errors and more — each with its own expression. One-line install, assets bundled, no build step.
 
-![taffy](assets/taffy-fork.gif)
+![demo](assets/demo.gif)
 
 ## Install
 

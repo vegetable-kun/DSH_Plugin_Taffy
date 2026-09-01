@@ -1,2 +1,4 @@
 node_modules/
 .DS_Store
+tools/demo-recorder/frames/
+tools/demo-recorder/palette.png

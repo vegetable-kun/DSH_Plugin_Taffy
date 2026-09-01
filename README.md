@@ -4,7 +4,7 @@
 
 这是一个 dsh 的插件，把 Taffy 表情包挂在 DeepSeek Harness Web UI 右下角，随 agent 状态自动切换：待审批、思考中、干活中、出错、被打断……全部有专属表情。标准 DSH 插件包（bundle + web client），素材随包分发，一条命令安装。
 
-![taffy](assets/taffy-fork.gif)
+![demo](assets/demo.gif)
 
 ## 安装
 

@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>taffy-mood demo</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0e0e14; color: #ddd; font-family: system-ui, sans-serif; }
+  body { display: flex; }
+  .mock { flex: 1; padding: 24px; }
+  .mock h1 { font-size: 16px; opacity: 0.6; font-weight: 400; margin: 0; }
+  .mock p { opacity: 0.45; font-size: 13px; }
+</style>
+</head>
+<body>
+  <div class="mock">
+    <h1>taffy-mood demo</h1>
+    <p>DSH 顶层 UI 模拟。右下角 taffy 是真实 client.js 渲染产物。</p>
+  </div>
+  <div id="anchor-shell-overlay"></div>
+  <div id="anchor-conversation-composer-dock" style="display:none"></div>
+  <div id="anchor-settings-section" style="display:none"></div>
+  <div id="anchor-tool-view-cordis" style="display:none"></div>
+
+  <!-- React UMD（ModuleLoader 静态注册表里就是 react） -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+  <script>
+    // === 简单 ModuleLoader stub：把 factory 注册到 require 字典里，materialize 时给 require ===
+    var requireStore = { react: { exports: window.React } }
+    function materialise(spec) {
+      var requireFn = function (id) {
+        if (id in requireStore) return requireStore[id].exports
+        throw new Error('demo: unknown require ' + id)
+      }
+      return spec.factory(requireFn)
+    }
+    var factories = []
+    window.__ModuleLoader__ = { load: function (s) { factories.push(s) } }
+  </script>
+
+  <!-- 加载真实 client.js（它会调用 __ModuleLoader__.load） -->
+  <script src="../../client.js"></script>
+
+  <script>
+    var taffySpec = factories.find(function (s) { return s.id === 'dsh-taffy-mood' })
+    if (!taffySpec) { throw new Error('no dsh-taffy-mood factory registered') }
+
+    // 拦截 fetch —— host 模拟器
+    var T0 = Date.now()
+    function ms() { return Date.now() - T0 }
+    var REV = 0
+    function frame() {
+      REV += 1
+      var t = ms()
+      var s = {
+        rev: REV, running: false, phase: 'wait',
+        approvalPending: false, lastApproval: null, lastApprovalAt: 0,
+        turnFlash: null, turnFlashAt: 0, locked: null,
+        surprisedUntil: 0, cryingUntil: 0, admirableUntil: 0,
+        waitingAnswer: false, beggingUntil: 0, compacting: false,
+        tired: false, ignoredApproval: false, sleeping: false,
+        cfg: { turn_flash_ms: 5000 },
+      }
+      // 4-6s 思考中
+      if (t >= 4000 && t < 6000) { s.running = true; s.phase = 'stream' }
+      // 6-7s 待审批
+      if (t >= 6000 && t < 7000) s.approvalPending = true
+      // 7-10s 庆祝 3s
+      if (t >= 7000 && t < 10000) { s.lastApproval = 'allowed-once'; s.lastApprovalAt = T0 + 7000 }
+      // 10-12s 黑客
+      if (t >= 10000 && t < 12000) { s.lastApproval = 'allowed-once'; s.lastApprovalAt = T0 + 7000; s.running = true; s.phase = 'tool' }
+      // 12-16s 得意 4s
+      if (t >= 12000 && t < 16000) s.admirableUntil = T0 + 16000
+      // 15-19s 插话 4s
+      if (t >= 15000 && t < 19000) s.surprisedUntil = T0 + 19000
+      return s
+    }
+    var realFetch = window.fetch.bind(window)
+    window.fetch = async function (url, opts) {
+      var u = String(url)
+      if (u.indexOf('/dsh-taffy-mood/api/asset-index') !== -1) {
+        var idx = {}
+        var NAMES = ['taffy-fork.gif','taffy-embarrassing.gif','taffy-spread_heart.gif','taffy-hacker.gif','taffy-tang-laughing.gif','taffy-dumb.gif','taffy-se_xy.gif','taffy-angry.gif','taffy-suicide.gif','taffy2-idling.gif','taffy-suprised.gif','taffy-cry.gif','taffy-begging.gif','taffy-admirable.gif','taffy-fake_crying.gif','taffy-staring.jpg','taffy-pressure.jpg','taffy-angry_staring.jpg','taffy-cry_denying.gif','taffy4.jpg','tafei.jpg']
+        NAMES.forEach(function (n) { idx[n] = n.replace(/\./, '.deadbeef.') })
+        return new Response(JSON.stringify(idx), { status: 200 })
+      }
+      if (u.indexOf('/dsh-taffy-mood/api/state') !== -1) {
+        return new Response(JSON.stringify({ ok: true, state: frame() }), { status: 200 })
+      }
+      if (u.indexOf('/dsh-taffy-mood/api/action') !== -1) {
+        return new Response(JSON.stringify({ ok: true, locked: null }), { status: 200 })
+      }
+      if (u.indexOf('/dsh-taffy-mood/assets/') !== -1) {
+        // demo 浏览器跑：走真实相对 URL ../assets/（puppeteer 加载 file:// demo.html 时
+        // base URL 是 demo.html 所在目录 tools/demo-recorder/，所以 ../../assets/ 命中仓库 root）
+        return realFetch(url, opts)
+      }
+      return realFetch(url, opts).catch(function() { return new Response('', { status: 404 }) })
+    }
+
+    // 简单的 slots stub：模拟 DSH 的 slot 调度——inject 注册 component，立即 mount 到对应 anchor
+    var ReactDOM = window.ReactDOM
+    var slotImpl = (function () {
+      var anchors = {
+        'shell.overlay': document.getElementById('anchor-shell-overlay'),
+        'conversation.composer.dock': document.getElementById('anchor-conversation-composer-dock'),
+        'settings.section': document.getElementById('anchor-settings-section'),
+        'tool.view.cordis': document.getElementById('anchor-tool-view-cordis'),
+      }
+      return {
+        inject: function (name, fn) {
+          // composer.dock 在 demo 里无 input prop，会读 props.input.draft 报错；吞掉
+          if (name === 'conversation.composer.dock') return
+          var ret
+          try { ret = fn() } catch (e) { console.error('[demo] inject ' + name + ' threw', e); return }
+          var Comp = (ret && ret.comp) || ret
+          console.log('[demo] inject', name, '→ Comp type:', typeof Comp)
+          if (!Comp) return
+          var anchor = anchors[name]
+          if (anchor) {
+            try { ReactDOM.createRoot(anchor).render(React.createElement(Comp)) }
+            catch (e) { anchor.textContent = '[mount err: ' + e.message + ']'; console.error('[demo] mount', name, e) }
+          }
+        },
+        register: function (key, comp) { return { name: key.name, id: key.id, order: key.order || 0, comp: comp } },
+      }
+    })()
+
+    var exportsObj = materialise(taffySpec)
+    // exportsObj.apply(ctx) — ctx 必须有 .get('slots')
+    exportsObj.apply({ get: function (id) { if (id === 'slots') return slotImpl; return undefined } })
+
+    // === 17s 拖到中间：fake mouse events on the rendered taffy img ===
+    setTimeout(function () {
+      var img = document.querySelector('img[alt]')
+      if (!img) return
+      var r = img.getBoundingClientRect()
+      img.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: r.left + 10, clientY: r.top + 10 }))
+      var cx = window.innerWidth / 2, cy = window.innerHeight / 2
+      document.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: cx, clientY: cy }))
+      document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: cx, clientY: cy }))
+    }, 17000)
+
+    // === 19s 中键点击 img：开控制台 ===
+    setTimeout(function () {
+      var img = document.querySelector('img[alt]')
+      if (!img) return
+      var r = img.getBoundingClientRect()
+      img.dispatchEvent(new MouseEvent('auxclick', { bubbles: true, button: 1, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }))
+    }, 19000)
+  </script>
+</body>
+</html>

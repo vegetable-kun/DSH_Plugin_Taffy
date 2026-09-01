@@ -1,8 +1,16 @@
 {
   "name": "dsh-taffy-mood",
-  "version": "2.0.4",
+  "version": "2.0.5",
   "description": "Taffy 表情包状态机：右下角悬浮表情随 agent 状态切换（待审批/思考/工具/插话/出错/被拒…）。A Taffy mood state machine overlay for DeepSeek Harness.",
-  "keywords": ["dsh", "dsh-plugin", "deepseek-harness", "taffy", "mascot", "emoji", "status"],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "taffy",
+    "mascot",
+    "emoji",
+    "status"
+  ],
   "license": "MIT",
   "type": "module",
   "main": "./host.js",
@@ -11,12 +19,24 @@
     "./client": "./client.js",
     "./package.json": "./package.json"
   },
-  "files": ["host.js", "client.js", "cordis.patch.yml", "assets"],
+  "files": [
+    "host.js",
+    "client.js",
+    "cordis.patch.yml",
+    "assets"
+  ],
   "engines": {
     "node": ">=20"
   },
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
-    "client": { "platform": "web" }
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "devDependencies": {
+    "puppeteer": "^25.9.0"
   }
 }
