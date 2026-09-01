@@ -17,7 +17,7 @@ dsh plugin --profile web add github:vegetable-kun/DSH_Plugin_Taffy
 <details>
 <summary><b>效果预览（点击展开）</b></summary>
 
-## 效果预览
+## 效果详细说明
 
 | 状态 | 表情 | 触发条件 |
 |---|---|---|
