@@ -26,7 +26,10 @@
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 
   <script>
-    // === 简单 ModuleLoader stub：把 factory 注册到 require 字典里，materialize 时给 require ===
+    // debug log
+    window.addEventListener('error', function (e) { console.error('[demo] uncaught', e.message) })
+    window.addEventListener('unhandledrejection', function (e) { console.error('[demo] unhandled rejection', e.reason) })
+    var __log = function () { console.log.apply(console, ['[demo]'].concat([].slice.call(arguments))) }
     var requireStore = { react: { exports: window.React } }
     function materialise(spec) {
       var requireFn = function (id) {
@@ -80,10 +83,12 @@
     window.fetch = async function (url, opts) {
       var u = String(url)
       if (u.indexOf('/dsh-taffy-mood/api/asset-index') !== -1) {
+        // demo server 已经把 /dsh-taffy-mood/assets/* 重写到 /assets/*；返回 basename 即可，
+        // client 的 ASSET_BASE 拼接后命中真实文件
         var idx = {}
         var NAMES = ['taffy-fork.gif','taffy-embarrassing.gif','taffy-spread_heart.gif','taffy-hacker.gif','taffy-tang-laughing.gif','taffy-dumb.gif','taffy-se_xy.gif','taffy-angry.gif','taffy-suicide.gif','taffy2-idling.gif','taffy-suprised.gif','taffy-cry.gif','taffy-begging.gif','taffy-admirable.gif','taffy-fake_crying.gif','taffy-staring.jpg','taffy-pressure.jpg','taffy-angry_staring.jpg','taffy-cry_denying.gif','taffy4.jpg','tafei.jpg']
-        NAMES.forEach(function (n) { idx[n] = n.replace(/\./, '.deadbeef.') })
-        return new Response(JSON.stringify(idx), { status: 200 })
+        NAMES.forEach(function (n) { idx[n] = n })
+        return new Response(JSON.stringify(idx), { status: 200, headers: { 'Content-Type': 'application/json' } })
       }
       if (u.indexOf('/dsh-taffy-mood/api/state') !== -1) {
         return new Response(JSON.stringify({ ok: true, state: frame() }), { status: 200 })
@@ -92,9 +97,11 @@
         return new Response(JSON.stringify({ ok: true, locked: null }), { status: 200 })
       }
       if (u.indexOf('/dsh-taffy-mood/assets/') !== -1) {
-        // demo 浏览器跑：走真实相对 URL ../assets/（puppeteer 加载 file:// demo.html 时
-        // base URL 是 demo.html 所在目录 tools/demo-recorder/，所以 ../../assets/ 命中仓库 root）
-        return realFetch(url, opts)
+        // 把绝对路径转成相对 demo.html 的 ../../assets/（file:// 上下文）
+        var name = u.split('/').pop().split('?')[0]
+        // 去掉伪 hash（如 .deadbeef.）：如果名字里含 .<hex>. 模式，去掉中间段
+        var realName = name.replace(/\.[0-9a-f]{8}\./, '.')
+        return realFetch('../../assets/' + realName, opts)
       }
       return realFetch(url, opts).catch(function() { return new Response('', { status: 404 }) })
     }
