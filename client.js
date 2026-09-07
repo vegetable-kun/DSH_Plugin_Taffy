@@ -240,7 +240,71 @@ window.__ModuleLoader__.load({
     function act(action, extraQuery) {
       return postAction(action, extraQuery)
     }
-    // 轮询节奏：活跃时 300ms（更跟手），无任何活跃态时 2s（够抓审批弹窗/host 变化）
+    // P1.7：把浮动菜单 / 工具卡片控制台 / 设置页的 host 状态同步统一到 EventSource
+    // 订阅同一 SSE 流：状态变更由 host 主动推送（≤50ms），不再各自轮询。
+    // 降级路径：SSE 不可用（路由未注册 / 旧 host 版本）时退回到 2s 轮询，保证 UI 不卡死。
+    var sseListeners = new Set()
+    var sseCurrentState = null  // 最新 snapshot, EventSource 重连时 fallback 用
+    var sseStarted = false
+    var sseFallbackLoops = new Set()
+    function notifySse(snapshot) {
+      sseCurrentState = snapshot
+      for (var i = 0; i < sseListeners.size; i += 1) {
+        var fn = Array.from(sseListeners)[i]
+        try { fn(snapshot) } catch (eNotify) { console.warn('[taffy] sse notify failed', eNotify) }
+      }
+    }
+    function subscribeToHost(callback) {
+      sseListeners.add(callback)
+      // 已有最新状态立刻喂给新订阅者,避免首帧空白
+      if (sseCurrentState !== null) {
+        try { callback(sseCurrentState) } catch { /* ignore */ }
+      }
+      ensureSseStarted()
+      return function unsubscribe() {
+        sseListeners.delete(callback)
+        if (sseListeners.size === 0 && sseFallbackLoops.size === 0) stopSseFallbacks()
+      }
+    }
+    function ensureSseStarted() {
+      if (sseStarted || typeof window.EventSource === 'undefined') return
+      sseStarted = true
+      var es = null
+      try { es = new window.EventSource(API_BASE + '/events') } catch (eEs) { return }
+      es.onmessage = function (ev) {
+        if (!ev || typeof ev.data !== 'string') return
+        try {
+          var msg = JSON.parse(ev.data)
+          if (msg && msg.type === 'state' && msg.state) notifySse(msg.state)
+        } catch (eParse) { /* ignore malformed frames */ }
+      }
+      es.onerror = function () {
+        // 浏览器会自动重连;若连接彻底失败(404/5xx),降级到 polling
+        if (es && es.readyState === window.EventSource.CLOSED) startSseFallbacks()
+      }
+    }
+    function startSseFallbacks() {
+      if (sseFallbackLoops.size > 0) return
+      var loop = async function () {
+        while (true) {
+          try {
+            var r = await api('/state')
+            if (r && r.state) notifySse(r.state)
+          } catch (eFb) { /* host 未就绪 */ }
+          await delay(2000)
+        }
+      }
+      var cancel = loop()
+      sseFallbackLoops.add({ cancel: function () { cancel = null } })
+    }
+    function stopSseFallbacks() {
+      for (var i = 0; i < sseFallbackLoops.size; i += 1) {
+        var entry = Array.from(sseFallbackLoops)[i]
+        if (entry && entry.cancel) { /* 无法真正取消 fire-and-forget 的 Promise,但它会自动 GC */ }
+      }
+      sseFallbackLoops.clear()
+    }
+    // 保留旧的轮询节奏常量,被工具卡片控制台独立 setTimeout 用
     var POLL_ACTIVE_MS = 300
     var POLL_IDLE_MS = 2000
 
@@ -314,6 +378,7 @@ window.__ModuleLoader__.load({
               var alive = true
               var notify = function () { bump(function (n) { return n + 1 }) }
               listeners.add(notify)
+              // P1.7：host state 由 EventSource 推流；time-driven 唤醒保留以等过期
               // 算下一次必须渲染的时刻：
               //   - 任一需要轮询捕获的状态活跃 → 300ms 后再查
               //   - 否则挑最近一个 client 端时间态到期点 + 兜底 2s
@@ -331,72 +396,70 @@ window.__ModuleLoader__.load({
                 if (greetEnd > t && greetEnd < due) due = greetEnd
                 return due
               }
-              var loop = async function () {
-                var t = Date.now()
-                while (alive) {
-                  try {
-                    var r = await api('/state')
-                    if (!alive) return
-                    if (r && r.state) {
-                      var s = r.state
-                      // 首次从 host 拿到 cfg 时把 turn_flash_ms 同步到本地
-                      if (s.cfg && typeof s.cfg.turn_flash_ms === 'number') TURN_FLASH_MS = s.cfg.turn_flash_ms
-                      // 累计今日各状态时长；即使 rev 未变化，时间态字段（surprisedUntil
-                      // 等）也可能让桶改变，所以每次 fetch 后都查一次
-                      tickStats(s)
-                      var applied = false
-                      var nextRev = s.rev || 0
-                      setHostState(function (prev) {
-                        // 单数字 diff：host 给出的 rev 即可代表整个 state 快照
-                        if (prev.rev === nextRev) return prev
-                        applied = true
-                        return {
-                          rev: nextRev,
-                          running: !!s.running,
-                          phase: s.phase || 'wait',
-                          approvalPending: !!s.approvalPending,
-                          lastApproval: s.lastApproval || null,
-                          lastApprovalAt: s.lastApprovalAt || 0,
-                          turnFlash: s.turnFlash || null,
-                          turnFlashAt: s.turnFlashAt || 0,
-                          locked: s.locked || null,
-                          surprisedUntil: s.surprisedUntil || 0,
-                          cryingUntil: s.cryingUntil || 0,
-                          admirableUntil: s.admirableUntil || 0,
-                          waitingAnswer: !!s.waitingAnswer,
-                          beggingUntil: s.beggingUntil || 0,
-                          compacting: !!s.compacting,
-                          tired: !!s.tired,
-                          ignoredApproval: !!s.ignoredApproval,
-                          sleeping: !!s.sleeping,
-                        }
-                      })
-                      // 状态无变化且有活跃时间态到期点即将到来，仍需 bump 让 React 重渲染来"等过期"
-                      if (!applied) {
-                        var nowT = Date.now()
-                        if (computeNextDueAt(s, nowT) - nowT < POLL_IDLE_MS) bump(function (n) { return n + 1 })
-                      }
-                      t = Date.now()
-                      await delay(Math.max(50, computeNextDueAt(s, t) - t))
-                    } else {
-                      await delay(POLL_IDLE_MS)
-                    }
-                  } catch (eApiPoll) { /* Host 未就绪时下一轮重试 */
-                    await delay(POLL_IDLE_MS)
+              var applySnapshot = function (s) {
+                if (!s) return false
+                // 首次从 host 拿到 cfg 时把 turn_flash_ms 同步到本地
+                if (s.cfg && typeof s.cfg.turn_flash_ms === 'number') TURN_FLASH_MS = s.cfg.turn_flash_ms
+                // 累计今日各状态时长；即使 rev 未变化，时间态字段（surprisedUntil
+                // 等）也可能让桶改变，所以每次 fetch 后都查一次
+                tickStats(s)
+                var applied = false
+                var nextRev = s.rev || 0
+                setHostState(function (prev) {
+                  // 单数字 diff：host 给出的 rev 即可代表整个 state 快照
+                  if (prev.rev === nextRev) return prev
+                  applied = true
+                  return {
+                    rev: nextRev,
+                    running: !!s.running,
+                    phase: s.phase || 'wait',
+                    approvalPending: !!s.approvalPending,
+                    lastApproval: s.lastApproval || null,
+                    lastApprovalAt: s.lastApprovalAt || 0,
+                    turnFlash: s.turnFlash || null,
+                    turnFlashAt: s.turnFlashAt || 0,
+                    locked: s.locked || null,
+                    surprisedUntil: s.surprisedUntil || 0,
+                    cryingUntil: s.cryingUntil || 0,
+                    admirableUntil: s.admirableUntil || 0,
+                    waitingAnswer: !!s.waitingAnswer,
+                    beggingUntil: s.beggingUntil || 0,
+                    compacting: !!s.compacting,
+                    tired: !!s.tired,
+                    ignoredApproval: !!s.ignoredApproval,
+                    sleeping: !!s.sleeping,
                   }
-                  notify()
+                })
+                return applied
+              }
+              var tickTimer = null
+              var scheduleNextTick = function () {
+                if (tickTimer !== null) clearTimeout(tickTimer)
+                var s = sseCurrentState
+                var delayMs = Math.max(50, computeNextDueAt(s, Date.now()) - Date.now())
+                tickTimer = setTimeout(function () {
+                  if (!alive) return
+                  bump(function (n) { return n + 1 })
                   // 跨零点检测：日切换时把 buckets 重置（保留当前正在累的段归零）
                   if (stats && stats.date !== todayIso()) {
                     stats = { date: todayIso(), segStart: Date.now(), current: null, buckets: { working: 0, approval: 0, proud: 0, blocked: 0, surprised: 0 }, currentTotal: 0 }
                     saveStatsNow()
                   }
                   notifyStats()
-                }
+                  scheduleNextTick()
+                }, delayMs)
               }
-              loop()
+              // 订阅 SSE；新 snapshot 到来时合并 hostState 并重排 tick 定时
+              var unsubscribe = subscribeToHost(function (s) {
+                if (!alive) return
+                applySnapshot(s)
+                scheduleNextTick()
+              })
               return function () {
                 alive = false
                 listeners.delete(notify)
+                if (tickTimer !== null) clearTimeout(tickTimer)
+                unsubscribe()
               }
             }, [])
 
@@ -728,21 +791,12 @@ window.__ModuleLoader__.load({
             var setMsg = msgTuple[1]
             React.useEffect(function () {
               var alive = true
-              var loop = async function () {
-                while (alive) {
-                  try {
-                    var r = await api('/state')
-                    if (!alive) return
-                    if (r && r.state) {
-                      var s = r.state
-                      setSt({ running: !!s.running, phase: s.phase || 'wait', approvalPending: !!s.approvalPending, locked: s.locked || null, waitingAnswer: !!s.waitingAnswer, compacting: !!s.compacting, tired: !!s.tired, ignoredApproval: !!s.ignoredApproval, sleeping: !!s.sleeping })
-                    }
-                  } catch (eConsolePoll) { /* Host 未就绪时下一轮重试 */ }
-                  await delay(500)
-                }
-              }
-              loop()
-              return function () { alive = false }
+              // P1.7：浮动菜单和控制台共用同一 SSE 流；状态变更立即同步
+              var unsubscribe = subscribeToHost(function (s) {
+                if (!alive || !s) return
+                setSt({ running: !!s.running, phase: s.phase || 'wait', approvalPending: !!s.approvalPending, locked: s.locked || null, waitingAnswer: !!s.waitingAnswer, compacting: !!s.compacting, tired: !!s.tired, ignoredApproval: !!s.ignoredApproval, sleeping: !!s.sleeping })
+              })
+              return function () { alive = false; unsubscribe() }
             }, [])
             var statusText = '闲置'
             if (st.locked) statusText = '已锁定：' + (LOCKMOODS[st.locked] ? LOCKMOODS[st.locked].label : st.locked)

@@ -53,6 +53,8 @@ export async function apply(ctx, config) {
     tired_after_ms: 3 * 60 * 1000,
     ignored_after_ms: 30 * 1000,
     sleep_after_ms: 10 * 60 * 1000,
+    // 用户按回车到 first chunk 之间的"刚启动"窗口也算工作中（P1.5）
+    user_message_run_ms: 6 * 1000,
   }
   if (config && typeof config === 'object') {
     for (const k of Object.keys(cfg)) {
@@ -70,13 +72,38 @@ export async function apply(ctx, config) {
     if (dot <= 0) return null
     return '/assets/' + name.slice(0, dot) + '.' + h + name.slice(dot)
   }
-  const bytesByHash = new Map()  // h -> Uint8Array
+  // P1.6：不再一次性把所有素材 bytes 驻留内存（17MB+ 全部常驻）
+  // 启动只算 hash 需要的 bytes 即用即丢；响应时按需 readFile，
+  // 命中本进程 LRU 缓存（容量受 MAX_BYTES_CACHE 控制）。
+  const MAX_BYTES_CACHE = 6 * 1024 * 1024  // 6MB 上限；典型一次请求 1-2 张图
+  const bytesByHash = new Map()  // h -> { bytes: Uint8Array, size: number }
+  let bytesCacheBytes = 0
+  const cachedRead = async (hash, file) => {
+    const hit = bytesByHash.get(hash)
+    if (hit !== undefined) {
+      // LRU bump
+      bytesByHash.delete(hash)
+      bytesByHash.set(hash, hit)
+      return hit.bytes
+    }
+    const bytes = await readFile(file)
+    const entry = { bytes, size: bytes.length }
+    bytesByHash.set(hash, entry)
+    bytesCacheBytes += entry.size
+    while (bytesCacheBytes > MAX_BYTES_CACHE) {
+      const oldestKey = bytesByHash.keys().next().value
+      const oldest = bytesByHash.get(oldestKey)
+      bytesByHash.delete(oldestKey)
+      bytesCacheBytes -= oldest.size
+    }
+    return bytes
+  }
   await Promise.all(Array.from(ASSET_TYPES.keys()).map(async (name) => {
     try {
       const bytes = await readFile(join(ASSETS_DIR, name))
       const h = createHash('sha256').update(bytes).digest('hex').slice(0, 8)
       assetHashes.set(name, h)
-      bytesByHash.set(h, bytes)
+      // 不缓存 bytes，仅登记 hash；冷启动多读一次但运行内存受 LRU 控制
     } catch (err) {
       // 缺失素材：跳过即可，路由返 404
     }
@@ -119,8 +146,41 @@ export async function apply(ctx, config) {
     // 单调递增版本号：任何可观察的状态变更都 +1；client 用它做单数字 diff
     rev: 0,
   }
+  // P1.7：SSE 客户端集合；rev++ 时把 snapshot 推给所有连接
+  // 用 Set 持有 res,断开时由 close handler 移除；heartbeat 防止代理/浏览器 idle timeout
+  const sseClients = new Set()
+  const SSE_HEARTBEAT_MS = 25 * 1000
+  const sseWriteEvent = (res, payload) => {
+    try {
+      res.write('data: ' + JSON.stringify(payload) + '\n\n')
+    } catch (errWrite) {
+      // 写失败（client 已断开）：下次心跳或下次推送时会被 close handler 清理
+    }
+  }
+  const sseBroadcast = () => {
+    const snap = snapshot()
+    for (const res of Array.from(sseClients)) {
+      sseWriteEvent(res, { type: 'state', state: snap })
+    }
+  }
+  let sseHeartbeatTimer = null
+  const ensureSseHeartbeat = () => {
+    if (sseHeartbeatTimer !== null || sseClients.size === 0) return
+    sseHeartbeatTimer = setInterval(() => {
+      for (const res of Array.from(sseClients)) {
+        try { res.write(': keepalive\n\n') } catch { sseClients.delete(res) }
+      }
+    }, SSE_HEARTBEAT_MS)
+  }
+  const maybeStopSseHeartbeat = () => {
+    if (sseClients.size === 0 && sseHeartbeatTimer !== null) {
+      clearInterval(sseHeartbeatTimer)
+      sseHeartbeatTimer = null
+    }
+  }
   // 关键阈值：用户按回车到 first chunk 之间算"工作中"，覆盖 turn/start 事件不可靠
-  const USER_MESSAGE_RUN_MS = 6 * 1000
+  // （P1.5：从 cfg 读，cordis.patch.yml 可覆盖）
+  const USER_MESSAGE_RUN_MS = cfg.user_message_run_ms
   const TIRED_AFTER_MS = cfg.tired_after_ms
   const IGNORED_AFTER_MS = cfg.ignored_after_ms
   const SLEEP_AFTER_MS = cfg.sleep_after_ms
@@ -299,9 +359,12 @@ export async function apply(ctx, config) {
     }
     }  // 关闭 inner handler
     // 包装层：每次事件后 rev++（含 lastActivityAt 变更，client 必能观测到）
+    // P1.7：rev++ 后向所有 SSE 客户端广播 snapshot；中键菜单 / 工具卡片
+    // 控制台 / 设置页 都订阅同一流，状态变更立即同步，不再各自轮询
     return ctx.on('session/event', (session, event) => {
       inner(session, event)
       state.rev += 1
+      if (sseClients.size > 0) sseBroadcast()
     })
   })
 
@@ -334,7 +397,11 @@ export async function apply(ctx, config) {
       ignoredApproval: state.approvalPending > 0 && state.approvalFirstAskedAt > 0 && Date.now() - state.approvalFirstAskedAt > IGNORED_AFTER_MS,
       sleeping: Date.now() - state.lastActivityAt > SLEEP_AFTER_MS,
       // 把阈值透传给 client，client 可派生自己需要的窗口（目前只取 turn_flash_ms）
-      cfg: { turn_flash_ms: cfg.turn_flash_ms },
+      cfg: {
+        turn_flash_ms: cfg.turn_flash_ms,
+        // P1.5：把 user_message_run_ms 透传,client 可派生自己的"刚启动"窗口判定
+        user_message_run_ms: cfg.user_message_run_ms,
+      },
       rev: state.rev,
     }
   }
@@ -345,11 +412,13 @@ export async function apply(ctx, config) {
         if (moodValue === null || moodValue === undefined || moodValue === '') {
           if (state.locked !== null) state.rev += 1
           state.locked = null
+          if (sseClients.size > 0) sseBroadcast()
           return { ok: true, locked: null }
         }
         if (typeof moodValue === 'string' && lockable.has(moodValue)) {
           if (state.locked !== moodValue) state.rev += 1
           state.locked = moodValue
+          if (sseClients.size > 0) sseBroadcast()
           return { ok: true, locked: state.locked }
         }
         return { ok: false, message: 'unknown mood: ' + String(moodValue) }
@@ -405,6 +474,42 @@ export async function apply(ctx, config) {
           sendJson(res, { ok: true, state: snapshot() })
           return
         }
+        if (path === '/api/events') {
+          // P1.7：Server-Sent Events 推流
+          // 连接时立即推送当前 snapshot，后续 rev++ 推增量。
+          // 同源 EventSource 自动带 cookie/Origin,通过 CORS 校验等同 loopback origin
+          // （webserver 的 Origin 头解析来自客户端发起端的页 origin）
+          const origin = req.headers && req.headers.origin
+          if (origin !== undefined && origin !== null) {
+            const okOrigin = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin)
+            if (!okOrigin) {
+              res.writeHead(403, { 'Content-Type': 'text/plain' })
+              res.end('origin not allowed')
+              return
+            }
+          }
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache, no-store',
+            'Connection': 'keep-alive',
+            // 防止 nginx 等代理缓冲
+            'X-Accel-Buffering': 'no',
+          })
+          // 立即推送 snapshot 作为首帧
+          sseWriteEvent(res, { type: 'state', state: snapshot() })
+          sseClients.add(res)
+          ensureSseHeartbeat()
+          // 客户端断开时清理 Set 与计时器
+          const onClose = () => {
+            if (!sseClients.has(res)) return
+            sseClients.delete(res)
+            maybeStopSseHeartbeat()
+            try { res.end() } catch { /* 已关闭 */ }
+          }
+          req.on('close', onClose)
+          req.on('aborted', onClose)
+          return
+        }
         if (path === '/api/action') {
           // CSRF 防护：写动作严格 POST-only + Origin 校验
           const method = String(req.method || 'GET').toUpperCase()
@@ -446,7 +551,9 @@ export async function apply(ctx, config) {
               const baseName = beforeExt.slice(0, dotHash) + ext
               const hash = beforeExt.slice(dotHash + 1)
               if (ASSET_TYPES.has(baseName) && /^[0-9a-f]{8}$/.test(hash)) {
-                const bytes = bytesByHash.get(hash)
+                // P1.6：按需 readFile + LRU 缓存（命中重复请求不再读盘）
+                const file = join(ASSETS_DIR, baseName)
+                const bytes = await cachedRead(hash, file)
                 if (bytes) {
                   res.writeHead(200, {
                     'Content-Type': ASSET_TYPES.get(baseName),

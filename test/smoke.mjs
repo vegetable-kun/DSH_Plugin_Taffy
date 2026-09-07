@@ -481,3 +481,54 @@ console.log('cross-session: pass (P0.1+P0.3 adoptSession 路径守门)')
   assert.match(clientSrc, /var hostState0 = \{ rev: -1/, 'client hostState0 哨兵应为 -1（非 0），避首次短路')
   console.log('rev-sentinel: pass (host rev=' + initRev + ' ≥ 0，client -1 哨兵避首次短路)')
 }
+
+// —— P1.7: SSE 推流守门 —— //
+// 连接时立即收到 snapshot + rev 变化时收到推送
+{
+  const sseFrames = []
+  const sseCloseListeners = []
+  const sseReq = {
+    url: '/dsh-taffy-mood/api/events',
+    method: 'GET',
+    headers: {},
+    on(name, fn) { if (name === 'close' || name === 'aborted') sseCloseListeners.push(fn) },
+  }
+  const fakeSseRes = {
+    code: null,
+    type: null,
+    cacheControl: null,
+    headers: null,
+    writtenChunks: [],
+    closed: false,
+    writeHead(code, headers) { this.code = code; this.headers = headers; this.type = headers && headers['Content-Type'] },
+    write(chunk) { this.writtenChunks.push(String(chunk)) },
+    end() { this.closed = true },
+  }
+  // 跑 handler（不要 await,handler 在 SSE 路径不返回）
+  Promise.resolve(handler(sseReq, fakeSseRes)).catch(() => {})
+
+  assert.equal(fakeSseRes.code, 200, 'SSE 应返回 200')
+  assert.match(fakeSseRes.type || '', /text\/event-stream/, 'Content-Type 应为 text/event-stream')
+
+  // 第一帧：连接立即推送 snapshot
+  await new Promise(function (resolve) { setTimeout(resolve, 10) })
+  const firstFrame = fakeSseRes.writtenChunks[0] || ''
+  assert.match(firstFrame, /^data: \{/, '首帧应为 data: JSON')
+  assert.match(firstFrame, /"type":"state"/, '首帧 type=state')
+  sseFrames.push(firstFrame)
+
+  // 触发一次 tool/call,rev 应递增,host 应推送一帧
+  const beforeFrames = fakeSseRes.writtenChunks.length
+  emit({ type: 'tool/call', data: { name: 'sse-test' } })
+  await new Promise(function (resolve) { setTimeout(resolve, 10) })
+  const newFrames = fakeSseRes.writtenChunks.slice(beforeFrames)
+  assert.ok(newFrames.length >= 1, 'rev 递增后 SSE 应推送至少一帧')
+  const newFrame = newFrames.join('')
+  assert.match(newFrame, /^data: \{/, '推送帧格式 data: {...}\\n\\n')
+  assert.match(newFrame, /"type":"state"/, '推送帧 type=state')
+
+  // 模拟 client 断开
+  for (const fn of sseCloseListeners) fn()
+  assert.equal(fakeSseRes.closed, true, '断开时应调用 res.end()')
+  console.log('sse: pass (连接即推 + rev++ 即推 + 断开清理)')
+}
