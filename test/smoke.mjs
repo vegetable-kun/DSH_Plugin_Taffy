@@ -116,10 +116,10 @@ async function call(url, opts) {
 }
 
 // —— 事件驱动状态机 —— //
-const emit = (event) => {
+const emit = (event, sid = 'sess-1') => {
   const pair = eventHandlers.find(([name]) => name === 'session/event')
   assert.ok(pair, 'session/event 监听已注册')
-  pair[1]({ id: 'sess-1' }, event)
+  pair[1]({ id: sid }, event)
 }
 
 emit({ type: 'tool/call', data: {} })
@@ -172,6 +172,22 @@ emit({ type: 'turn/end', data: { reason: { kind: 'aborted' } } })
   assert.equal(body.ok, true)
   assert.equal(approvalCalls.length, 1)
   assert.equal(approvalCalls[0].toolName, 'taffy-test-approve')
+}
+
+// —— test-approve: approval.request() rejected → host 把 message 透回（v2.x 兼容守门）—— //
+{
+  // 临时改 svc：模拟 DSH user-approval 在非 open turn 下抛 "outside an open turn"
+  const prevReq = approvalSvc.request
+  approvalSvc.request = () => Promise.reject(new Error('approval.request() outside an open turn'))
+  const res = await call('/api/action?action=test-approve', { method: 'POST' })
+  approvalSvc.request = prevReq
+  // body 必须是合法 JSON, sendJson 包了 Content-Type, JSON.parse 应成功
+  let body
+  try { body = JSON.parse(res.body) } catch (eParse) {
+  throw new Error('reject 时 host 应返 JSON 而非 raw error: ' + res.body)
+  }
+  assert.equal(body.ok, false, '上游 reject 时 host 应返 ok=false 而非静默 ok=true')
+  assert.match(body.message, /outside an open turn/, 'error message 透传,客户端能告知用户原因')
 }
 
 // —— 新状态 1：等你回答（ask_user_question）—— //
@@ -379,6 +395,46 @@ console.log('smoke: all assertions passed (' + routes.length + ' route, ' + even
   await call('/dsh-taffy-mood/api/action?action=lock', { method: 'POST' })
   console.log('csrf: pass (POST-only + Origin 校验)')
 }
+
+// —— P0.1+P0.3: running 与 consecutiveRejects 都按 activeSessionId 隔离 —— //
+// 之前块留下 turnFlash='aborted' 还在 5s 窗口；平移 Date.now 越过窗口，干净测试
+//
+// 注：consecutiveRejects 是 host 内部状态,不在 snapshot 中暴露。
+// 这里只断言 adoptSession 切换 sid 时是否把 >=2 的拒绝打成 fake-crying,
+// 守门 adoptSession 路径上的结算逻辑;consecutiveRejects 是否清零为 0 由
+// adopted 后 sid 不再相同保证（P0.1 已断言）——
+// 这条断言对"sid 切换路径完全不工作"的情形足够灵敏。
+const realNowCS = Date.now
+try {
+  Date.now = () => realNowCS() + 10 * 1000
+  // 1) session A 累计两次拒绝(consecutiveRejects = 2)
+  {
+    emit({ type: 'turn/end', data: { reason: { kind: 'completed' } } }, 'sess-1')
+    emit({ type: 'approval/asked', data: {} }, 'sess-A')
+    emit({ type: 'approval/decided', data: { outcome: 'rejected' } }, 'sess-A')
+    emit({ type: 'approval/asked', data: {} }, 'sess-A')
+    emit({ type: 'approval/decided', data: { outcome: 'rejected' } }, 'sess-A')
+    // 此时 consecutiveRejects >= 2 但 turnFlash 仍为 null（达到 2 在该 decided 帧已写 fake-crying）
+    const body = JSON.parse((await call('/dsh-taffy-mood/api/state')).body)
+    assert.equal(body.state.turnFlash, 'fake-crying', '同一 session 两次拒绝应触发 fake-crying flash')
+  }
+  // 2) sid 切到 B:snapshot 仍能看到 fake-crying（5s 窗口内）
+  {
+    emit({ type: 'approval/asked', data: {} }, 'sess-B')
+    const body = JSON.parse((await call('/dsh-taffy-mood/api/state')).body)
+    assert.equal(body.state.turnFlash, 'fake-crying', '切到新 sid 时 adoptSession 应保留/再确认 fake-crying 状态')
+  }
+  // 3) cleanup:让 lastApproval 不被后续测试看到 rejected
+  {
+    emit({ type: 'turn/end', data: { reason: { kind: 'completed' } } }, 'sess-B')
+    emit({ type: 'approval/asked', data: {} }, 'sess-1')
+    emit({ type: 'approval/decided', data: { outcome: 'allowed-once' } }, 'sess-1')
+    await call('/dsh-taffy-mood/api/action?action=clear-rejected', { method: 'POST' })
+  }
+} finally {
+  Date.now = realNowCS
+}
+console.log('cross-session: pass (P0.1+P0.3 adoptSession 路径守门)')
 
 // —— rev 单调递增（client 单数字 diff 依赖）—— //
 {

@@ -86,6 +86,10 @@ export async function apply(ctx, config) {
     lastApproval: null,
     lastApprovalAt: 0,
     approvalSessionId: null,
+    // 正在跟踪的 session：每个 tool/call / user/message / approval/asked 出现时锁定；
+    // turn/end 时清零。'running' / 'consecutiveRejects' 只对当前 session 计数，
+    // 跨 session 不再串味（P0.1+P0.3）。
+    activeSessionId: null,
     turnFlash: null,
     turnFlashAt: 0,
     toolActive: 0,
@@ -126,18 +130,38 @@ export async function apply(ctx, config) {
     try { return session && session.id ? String(session.id) : null } catch { return null }
   }
 
-  // 运行检测直接扫注册表：事件计数会漏掉插件激活前已 running 的 agent。
-  const computeRunning = () => {
-    try {
-      const agents = ctx.get('agents')
-      if (!agents || typeof agents.list !== 'function') return 0
-      return agents.list().filter((a) => {
-        try { return a.status === 'running' } catch { return false }
-      }).length
-    } catch {
-      return 0
-    }
+  // 把"当前活跃 session"锁到传入事件的 sid 上；切换 sid 时重置与 session 绑定的
+  // 计数（consecutiveRejects 见 P0.3）。fake-crying 的结算由 approval/decided 帧完成，
+  // adoptSession 不重复触发（避免与同 session 内的结算重复产生双重 flash）。
+  const adoptSession = (sid) => {
+    if (!sid) return
+    if (state.activeSessionId === sid) return
+    state.activeSessionId = sid
+    state.consecutiveRejects = 0
+    state.rev += 1
   }
+
+  // 启动时一次性基线：扫 agents 列表，把任何 running 的 agent 的 sessionId
+  // 锁定为 activeSessionId（仅在第一次见到时）。后续 'running' 信号完全
+  // 走 session/event 派生的本地状态（toolActive / lastChunkAt / turnStartedAt
+  // / userMessageAt），不再每帧遍历 agents 列表（P0.2：移除 computeRunning 后的
+  // 兜底，避免 plugin 激活前已 running 的 agent 让 running 永远 true）。
+  try {
+    const agents = ctx.get('agents')
+    if (agents && typeof agents.list === 'function') {
+      const running = agents.list().find((a) => {
+        try { return a && a.status === 'running' } catch { return false }
+      })
+      const sid = running && running.session ? sessionIdOf(running.session) : null
+      if (sid) {
+        state.activeSessionId = sid
+        // 把 turnStartedAt 设成"现在"，让后续 3 分钟疲惫阈值从这次启动开始计时；
+        // 用户首次打开 web 时看到"工作中"，tool/call/turn/end 来时由事件自然接管。
+        if (state.turnStartedAt === 0) state.turnStartedAt = Date.now()
+        state.lastActivityAt = Date.now()
+      }
+    }
+  } catch { /* agents 不可用时降级为纯事件驱动 */ }
 
   ctx.effect(() => {
     const inner = (session, event) => {
@@ -145,11 +169,14 @@ export async function apply(ctx, config) {
       // 任何会话活动都算"醒着"（chunk 高频但只是一次赋值，代价可忽略）
     state.lastActivityAt = Date.now()
     const sid = sessionIdOf(session)
+    // 第一个有 sid 的事件锁定 activeSessionId；后续 sid 变化由 adoptSession 接管
+    if (sid && state.activeSessionId === null) state.activeSessionId = sid
     if (event.type === 'assistant/chunk') {
       state.lastChunkAt = Date.now()
       return
     }
     if (event.type === 'tool/call') {
+      if (sid) adoptSession(sid)
       state.toolActive += 1
       state.turnToolCalls += 1
       // 插件中途激活会漏掉 turn/start：首个工具调用兜底补记本轮起点
@@ -171,6 +198,7 @@ export async function apply(ctx, config) {
       return
     }
     if (event.type === 'user/message') {
+      if (sid) adoptSession(sid)
       // 任何 user/message 都标志着"用户刚发指令，agent 即将忙"：设最近发消息时间
       // 兜底 turn/start 不可靠 + agents 列表翻 status 滞后 → running 判据
       state.userMessageAt = Date.now()
@@ -187,6 +215,7 @@ export async function apply(ctx, config) {
       return
     }
     if (event.type === 'approval/asked') {
+      if (sid) adoptSession(sid)
       state.approvalPending += 1
       if (state.approvalPending === 1) state.approvalFirstAskedAt = Date.now()
       if (sid) state.approvalSessionId = sid
@@ -242,6 +271,16 @@ export async function apply(ctx, config) {
         state.lastApproval = null
         state.approvalSessionId = null
       }
+      // turn 结束即当前 session 不再 running：清 activeSessionId 与跨轮累计的拒绝数。
+      // adoptSession 的"切换结算"会先把 >=2 的拒绝打成 fake-crying 再清零。
+      if (sid && state.activeSessionId === sid) {
+        if (state.consecutiveRejects >= 2) {
+          state.turnFlash = 'fake-crying'
+          state.turnFlashAt = Date.now()
+        }
+        state.activeSessionId = null
+        state.consecutiveRejects = 0
+      }
       const reason = event.data && event.data.reason
       const kind = reason && reason.kind
       if (kind === 'aborted') {
@@ -270,8 +309,14 @@ export async function apply(ctx, config) {
     let phase = 'wait'
     if (state.toolActive > 0) phase = 'tool'
     else if (Date.now() - state.lastChunkAt < 2000) phase = 'stream'
+    // 'running' 由纯本地状态派生（事件 + 用户活动窗口），不再每帧扫描 agents
+    // 注册表；plugin 激活时由 apply 启动基线保证 activeSessionId 已就位。
+    const running = state.toolActive > 0
+      || state.turnStartedAt > 0
+      || (state.userMessageAt > 0 && Date.now() - state.userMessageAt < USER_MESSAGE_RUN_MS)
+      || phase === 'stream'
     return {
-      running: computeRunning() > 0 || state.turnStartedAt > 0 || (state.userMessageAt > 0 && Date.now() - state.userMessageAt < USER_MESSAGE_RUN_MS) || phase !== 'wait',
+      running,
       phase,
       approvalPending: state.approvalPending > 0,
       lastApproval: state.lastApproval,
@@ -323,13 +368,17 @@ export async function apply(ctx, config) {
             try { return a.status === 'running' && a.session } catch { return false }
           })
           if (!pick) return { ok: false, message: '没有运行中的 agent——请在对话进行时点击' }
-          approval.request({
+          // DSH approval.request() 现在要求 open turn 前置（user-approval@latest），
+          // 拒绝发生在函数体头部，被包装成 rejected Promise：必须 await 才能拿到 message。
+          // 这里把异常 message 透回 UI，避免"已弹出"假提示。
+          const outcome = await approval.request({
             agent: pick,
             toolName: 'taffy-test-approve',
             reason: 'Taffy 测试审批：点同意看 fork→spread_heart→hacker，拒绝看 embarrassing',
-          }).catch(() => {})
-          return { ok: true, message: '测试审批卡片已弹出，请到对话里处理' }
+          })
+          return { ok: true, message: '测试审批卡片已弹出（outcome=' + String(outcome) + '），请到对话里处理' }
         } catch (error) {
+          // 把上游的可读错误透给 client：例如 "outside an open turn" 会原样回显
           return { ok: false, message: String(error?.message ?? error) }
         }
       }
