@@ -1,12 +1,23 @@
-// dsh-taffy-mood —— Host 半边：表情状态机（session/event 审计 + 包内素材路由 + JSON API）
+// dsh-taffy-mood —— Host 半边：表情状态机（session/event 审计 + 包内素材路由 + JSON API + SSE）
 // 状态机逻辑与动态插件版一致；素材随包分发，经 /dsh-taffy-mood/assets/ 提供；
-// 浏览器半边通过 /dsh-taffy-mood/api/* 轮询状态、提交动作（whale-musume 模式）。
+// 浏览器半边通过 /dsh-taffy-mood/api/* 订阅 SSE + 提交动作（whale-musume 模式）。
+//
+// 文件分区（P2.8）：
+//   A. 常量与白名单
+//   B. buildCfg — 配置合并
+//   C. buildAssetHashes — 素材哈希 + LRU 缓存
+//   D. SSE 总线工厂
+//   E. 路由 handler 拆分（state / action / asset / asset-index / events）
+//   F. apply(ctx, config) — 组合所有模块
 
 import { readFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { extname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+// ════════════════════════════════════════════════════════════════════
+// A. 常量与白名单
+// ════════════════════════════════════════════════════════════════════
 export const name = 'dsh-taffy-mood'
 export const inject = ['webServer']
 
@@ -39,9 +50,12 @@ const ASSET_TYPES = new Map([
   ['taffy-underwear.jpg', 'image/jpeg'],
 ])
 
-export async function apply(ctx, config) {
-  // 阈值可由 cordis.patch.yml 的 config 字段覆盖（snake_case + 默认兜底）
-  // 字段对应见 README；未传保持原默认值不变
+// ════════════════════════════════════════════════════════════════════
+// B. buildCfg — 配置合并
+// ════════════════════════════════════════════════════════════════════
+// 阈值可由 cordis.patch.yml 的 config 字段覆盖（snake_case + 默认兜底）
+// 字段对应见 README；未传保持原默认值不变
+function buildCfg(config) {
   const cfg = {
     surprised_ms: 4000,
     turn_flash_ms: 5000,
@@ -53,7 +67,7 @@ export async function apply(ctx, config) {
     tired_after_ms: 3 * 60 * 1000,
     ignored_after_ms: 30 * 1000,
     sleep_after_ms: 10 * 60 * 1000,
-    // 用户按回车到 first chunk 之间的"刚启动"窗口也算工作中（P1.5）
+    // P1.5：用户按回车到 first chunk 之间也算工作中，cordis.patch.yml 可覆盖
     user_message_run_ms: 6 * 1000,
   }
   if (config && typeof config === 'object') {
@@ -62,6 +76,13 @@ export async function apply(ctx, config) {
       if (typeof v === 'number' && v > 0) cfg[k] = v
     }
   }
+  return cfg
+}
+
+// ════════════════════════════════════════════════════════════════════
+// C. buildAssetHashes — 启动期算 SHA256,响应期按需 readFile + LRU
+// ════════════════════════════════════════════════════════════════════
+async function buildAssetHashes() {
   // 内容哈希：启动时为每个允许分发的素材算 SHA256 截 8 hex
   // URL 形如 /assets/<basename>.<hash>.<ext>，命中走 1 年强缓存
   const assetHashes = new Map()  // name -> 8 hex
@@ -81,7 +102,6 @@ export async function apply(ctx, config) {
   const cachedRead = async (hash, file) => {
     const hit = bytesByHash.get(hash)
     if (hit !== undefined) {
-      // LRU bump
       bytesByHash.delete(hash)
       bytesByHash.set(hash, hit)
       return hit.bytes
@@ -103,11 +123,177 @@ export async function apply(ctx, config) {
       const bytes = await readFile(join(ASSETS_DIR, name))
       const h = createHash('sha256').update(bytes).digest('hex').slice(0, 8)
       assetHashes.set(name, h)
-      // 不缓存 bytes，仅登记 hash；冷启动多读一次但运行内存受 LRU 控制
     } catch (err) {
       // 缺失素材：跳过即可，路由返 404
     }
   }))
+  return { assetHashes, hashedUrl, cachedRead }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// D. SSE 总线工厂
+// ════════════════════════════════════════════════════════════════════
+// 用 Set 持有 res,断开时由 close handler 移除；heartbeat 防止代理/浏览器 idle timeout
+function buildSSEBus(snapshot) {
+  const clients = new Set()
+  const SSE_HEARTBEAT_MS = 25 * 1000
+  let heartbeatTimer = null
+
+  const writeEvent = (res, payload) => {
+    try { res.write('data: ' + JSON.stringify(payload) + '\n\n') } catch { /* 写失败:下次心跳清理 */ }
+  }
+  const sendFirstFrame = (res, snap) => writeEvent(res, { type: 'state', state: snap })
+  const broadcast = () => {
+    const snap = snapshot()
+    for (const res of Array.from(clients)) writeEvent(res, { type: 'state', state: snap })
+  }
+  const ensureHeartbeat = () => {
+    if (heartbeatTimer !== null || clients.size === 0) return
+    heartbeatTimer = setInterval(() => {
+      for (const res of Array.from(clients)) {
+        try { res.write(': keepalive\n\n') } catch { clients.delete(res) }
+      }
+    }, SSE_HEARTBEAT_MS)
+  }
+  const maybeStopHeartbeat = () => {
+    if (clients.size === 0 && heartbeatTimer !== null) {
+      clearInterval(heartbeatTimer)
+      heartbeatTimer = null
+    }
+  }
+  const addClient = (res) => {
+    clients.add(res)
+    ensureHeartbeat()
+  }
+  const removeClient = (res) => {
+    if (!clients.has(res)) return
+    clients.delete(res)
+    maybeStopHeartbeat()
+    try { res.end() } catch { /* 已关闭 */ }
+  }
+  const isEmpty = () => clients.size === 0
+
+  return { broadcast, addClient, removeClient, isEmpty, sendFirstFrame }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// E. 路由 handler 拆分
+// ════════════════════════════════════════════════════════════════════
+// 共享辅助
+const isLoopbackOrigin = (origin) => /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin)
+
+function sendJson(res, value) {
+  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+  res.end(JSON.stringify(value))
+}
+function sendText(res, code, text, extraHeaders) {
+  res.writeHead(code, { 'Content-Type': 'text/plain', ...(extraHeaders || {}) })
+  res.end(text)
+}
+
+// handleState: GET /api/state
+function handleState(res, snapshot) {
+  sendJson(res, { ok: true, state: snapshot() })
+}
+
+// handleSSE: GET /api/events (P1.7)
+function handleSSE(req, res, sseBus, snapshot) {
+  // 同源 EventSource 自动带 cookie/Origin,通过 CORS 校验等同 loopback origin
+  const origin = req.headers && req.headers.origin
+  if (origin !== undefined && origin !== null && !isLoopbackOrigin(origin)) {
+    return sendText(res, 403, 'origin not allowed')
+  }
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-store',
+    'Connection': 'keep-alive',
+    // 防止 nginx 等代理缓冲
+    'X-Accel-Buffering': 'no',
+  })
+  // 立即推送 snapshot 作为首帧（新连接必须拿到一份初始状态）
+  sseBus.sendFirstFrame(res, snapshot())
+  sseBus.addClient(res)
+  const onClose = () => sseBus.removeClient(res)
+  req.on('close', onClose)
+  req.on('aborted', onClose)
+}
+
+// handleAction: POST /api/action (CSRF 保护)
+async function handleAction(req, url, runAction) {
+  // 写动作严格 POST-only + Origin 校验
+  const method = String(req.method || 'GET').toUpperCase()
+  if (method !== 'POST') return { status: 405, text: 'method not allowed', allow: 'POST' }
+  const origin = req.headers && req.headers.origin
+  // Origin 缺省（curl/扩展）放行；非缺省时必须匹配 loopback
+  if (origin !== undefined && origin !== null && !isLoopbackOrigin(origin)) {
+    return { status: 403, text: 'origin not allowed' }
+  }
+  const result = await runAction(url.searchParams.get('action'), url.searchParams.get('mood'))
+  if (result === null) return { status: 404, text: 'unknown action' }
+  return { status: 200, json: result }
+}
+
+// handleAsset: GET /assets/<name>[.<hash>.<ext>]
+// path 应是已剥离 ROUTE_BASE 的局部路径,如 /assets/<name>
+async function handleAsset(path, assetHashes, hashedUrl, cachedRead) {
+  const requestName = decodeURIComponent(path.slice('/assets/'.length).split('?')[0])
+  // 形式 1：带哈希的 URL /assets/<base>.<hash>.<ext>
+  //   base 含 .jpg/.gif 前的全部点也算进去（用 lastIndexOf 切第二段为 hash）
+  const dotExt = requestName.lastIndexOf('.')
+  if (dotExt > 0) {
+    const beforeExt = requestName.slice(0, dotExt)
+    const ext = requestName.slice(dotExt)
+    const dotHash = beforeExt.lastIndexOf('.')
+    if (dotHash > 0) {
+      const baseName = beforeExt.slice(0, dotHash) + ext
+      const hash = beforeExt.slice(dotHash + 1)
+      if (ASSET_TYPES.has(baseName) && /^[0-9a-f]{8}$/.test(hash)) {
+        // P1.6：按需 readFile + LRU 缓存（命中重复请求不再读盘）
+        const file = join(ASSETS_DIR, baseName)
+        const bytes = await cachedRead(hash, file)
+        if (bytes) {
+          return {
+            status: 200,
+            headers: {
+              'Content-Type': ASSET_TYPES.get(baseName),
+              'Cache-Control': 'public, max-age=31536000, immutable',
+              'Content-Length': String(bytes.length),
+            },
+            body: bytes,
+          }
+        }
+      }
+    }
+  }
+  // 形式 2：老的无哈希 URL → 301 跳转到带哈希 URL（永久）
+  if (ASSET_TYPES.has(requestName)) {
+    const target = hashedUrl(requestName)
+    if (target) return { status: 301, location: target, cacheControl: 'public, max-age=300' }
+  }
+  return { status: 404, text: 'not found' }
+}
+
+// handleAssetIndex: GET /api/asset-index
+function handleAssetIndex(res, assetHashes) {
+  // 启动时算好的 {name: hash} 映射表；client 拉一次拼 GIFS url
+  const idx = {}
+  for (const [name, h] of assetHashes) {
+    const dot = name.lastIndexOf('.')
+    const base = dot > 0 ? name.slice(0, dot) : name
+    const ext = dot > 0 ? name.slice(dot) : ''
+    idx[name] = base + '.' + h + ext
+  }
+  sendJson(res, idx)
+}
+
+// ════════════════════════════════════════════════════════════════════
+// F. apply(ctx, config) — 组合所有模块
+// ════════════════════════════════════════════════════════════════════
+export async function apply(ctx, config) {
+  const cfg = buildCfg(config)
+  const { assetHashes, hashedUrl, cachedRead } = await buildAssetHashes()
+
+  // ── F.1 状态机 ──
   const state = {
     approvalPending: 0,
     lastApproval: null,
@@ -127,72 +313,33 @@ export async function apply(ctx, config) {
     admirableUntil: 0,
     consecutiveRejects: 0,
     turnToolCalls: 0,
-    // 等你回答：ask_user_question 挂起期间为 true；回答消息/结果配对/轮次结束三路清除
     askPending: false,
     askCallId: null,
-    // 求饶窗口：60 秒内第二次审批请求时置 5 秒时间盒，过期自动回落到 fork
     lastAskedAt: 0,
     beggingUntil: 0,
-    // 压缩记忆：compaction/start 置时间戳（含 90 秒兜底），end/summary/prune 归零
     compactingUntil: 0,
-    // 长任务疲惫：本轮起点，超阈值后运行态改显疲惫（turn/end 清零）
     turnStartedAt: 0,
-    // 审批没人理：首个审批挂起的时刻（pending 归零即清），超阈值改显 cry_denying
     approvalFirstAskedAt: 0,
-    // 休眠：最近一次会话活动时刻，超阈值且无更高状态时切静态图省解码
     lastActivityAt: Date.now(),
-    // 用户最近一次发消息时刻：保证回车后到 first chunk 之间的"刚启动"窗口也算工作中
     userMessageAt: 0,
-    // 单调递增版本号：任何可观察的状态变更都 +1；client 用它做单数字 diff
     rev: 0,
   }
-  // P1.7：SSE 客户端集合；rev++ 时把 snapshot 推给所有连接
-  // 用 Set 持有 res,断开时由 close handler 移除；heartbeat 防止代理/浏览器 idle timeout
-  const sseClients = new Set()
-  const SSE_HEARTBEAT_MS = 25 * 1000
-  const sseWriteEvent = (res, payload) => {
-    try {
-      res.write('data: ' + JSON.stringify(payload) + '\n\n')
-    } catch (errWrite) {
-      // 写失败（client 已断开）：下次心跳或下次推送时会被 close handler 清理
-    }
-  }
-  const sseBroadcast = () => {
-    const snap = snapshot()
-    for (const res of Array.from(sseClients)) {
-      sseWriteEvent(res, { type: 'state', state: snap })
-    }
-  }
-  let sseHeartbeatTimer = null
-  const ensureSseHeartbeat = () => {
-    if (sseHeartbeatTimer !== null || sseClients.size === 0) return
-    sseHeartbeatTimer = setInterval(() => {
-      for (const res of Array.from(sseClients)) {
-        try { res.write(': keepalive\n\n') } catch { sseClients.delete(res) }
-      }
-    }, SSE_HEARTBEAT_MS)
-  }
-  const maybeStopSseHeartbeat = () => {
-    if (sseClients.size === 0 && sseHeartbeatTimer !== null) {
-      clearInterval(sseHeartbeatTimer)
-      sseHeartbeatTimer = null
-    }
-  }
-  // 关键阈值：用户按回车到 first chunk 之间算"工作中"，覆盖 turn/start 事件不可靠
-  // （P1.5：从 cfg 读，cordis.patch.yml 可覆盖）
+
+  // 关键阈值：从 cfg 读取（P1.5：cordis.patch.yml 可覆盖）
   const USER_MESSAGE_RUN_MS = cfg.user_message_run_ms
   const TIRED_AFTER_MS = cfg.tired_after_ms
   const IGNORED_AFTER_MS = cfg.ignored_after_ms
   const SLEEP_AFTER_MS = cfg.sleep_after_ms
-  const lockable = new Set(['idle', 'thinking', 'tool', 'hacker', 'celebrate', 'rejected', 'angry', 'suicide', 'surprised', 'crying', 'begging', 'admirable', 'fake_crying', 'waiting', 'compacting', 'tired', 'ignoredApproval', 'sleeping', 'greeting'])
+  const lockable = new Set([
+    'idle', 'thinking', 'tool', 'hacker', 'celebrate', 'rejected', 'angry', 'suicide',
+    'surprised', 'crying', 'begging', 'admirable', 'fake_crying', 'waiting',
+    'compacting', 'tired', 'ignoredApproval', 'sleeping', 'greeting',
+  ])
 
+  // ── F.2 session 事件处理 + adoptSession ──
   const sessionIdOf = (session) => {
     try { return session && session.id ? String(session.id) : null } catch { return null }
   }
-
-  // 把"当前活跃 session"锁到传入事件的 sid 上；切换 sid 时重置与 session 绑定的
-  // 计数（consecutiveRejects 见 P0.3）。fake-crying 的结算由 approval/decided 帧完成，
-  // adoptSession 不重复触发（避免与同 session 内的结算重复产生双重 flash）。
   const adoptSession = (sid) => {
     if (!sid) return
     if (state.activeSessionId === sid) return
@@ -200,12 +347,9 @@ export async function apply(ctx, config) {
     state.consecutiveRejects = 0
     state.rev += 1
   }
-
   // 启动时一次性基线：扫 agents 列表，把任何 running 的 agent 的 sessionId
-  // 锁定为 activeSessionId（仅在第一次见到时）。后续 'running' 信号完全
-  // 走 session/event 派生的本地状态（toolActive / lastChunkAt / turnStartedAt
-  // / userMessageAt），不再每帧遍历 agents 列表（P0.2：移除 computeRunning 后的
-  // 兜底，避免 plugin 激活前已 running 的 agent 让 running 永远 true）。
+  // 锁定为 activeSessionId。后续 'running' 信号完全走 session/event 派生的本地状态
+  // (P0.2：移除 computeRunning 后的兜底)。
   try {
     const agents = ctx.get('agents')
     if (agents && typeof agents.list === 'function') {
@@ -215,165 +359,17 @@ export async function apply(ctx, config) {
       const sid = running && running.session ? sessionIdOf(running.session) : null
       if (sid) {
         state.activeSessionId = sid
-        // 把 turnStartedAt 设成"现在"，让后续 3 分钟疲惫阈值从这次启动开始计时；
-        // 用户首次打开 web 时看到"工作中"，tool/call/turn/end 来时由事件自然接管。
         if (state.turnStartedAt === 0) state.turnStartedAt = Date.now()
         state.lastActivityAt = Date.now()
       }
     }
   } catch { /* agents 不可用时降级为纯事件驱动 */ }
 
-  ctx.effect(() => {
-    const inner = (session, event) => {
-      if (!event || typeof event.type !== 'string') return
-      // 任何会话活动都算"醒着"（chunk 高频但只是一次赋值，代价可忽略）
-    state.lastActivityAt = Date.now()
-    const sid = sessionIdOf(session)
-    // 第一个有 sid 的事件锁定 activeSessionId；后续 sid 变化由 adoptSession 接管
-    if (sid && state.activeSessionId === null) state.activeSessionId = sid
-    if (event.type === 'assistant/chunk') {
-      state.lastChunkAt = Date.now()
-      return
-    }
-    if (event.type === 'tool/call') {
-      if (sid) adoptSession(sid)
-      state.toolActive += 1
-      state.turnToolCalls += 1
-      // 插件中途激活会漏掉 turn/start：首个工具调用兜底补记本轮起点
-      if (state.turnStartedAt === 0) state.turnStartedAt = Date.now()
-      // 等你回答：ask_user_question 发出即挂起，直到回答消息/结果配对/轮次结束清除
-      if (event.data && event.data.name === 'ask_user_question') {
-        state.askCallId = event.data.callId || null
-        state.askPending = true
-      }
-      return
-    }
-    if (event.type === 'tool/result') {
-      state.toolActive = Math.max(0, state.toolActive - 1)
-      const tid = event.data && event.data.message && event.data.message.toolCallId
-      if (state.askPending && tid && state.askCallId === tid) {
-        state.askPending = false
-        state.askCallId = null
-      }
-      return
-    }
-    if (event.type === 'user/message') {
-      if (sid) adoptSession(sid)
-      // 任何 user/message 都标志着"用户刚发指令，agent 即将忙"：设最近发消息时间
-      // 兜底 turn/start 不可靠 + agents 列表翻 status 滞后 → running 判据
-      state.userMessageAt = Date.now()
-      // 回答到达：消费提问态，不算插话（否则每次答题都误报惊讶）。
-      if (state.askPending) {
-        state.askPending = false
-        state.askCallId = null
-        return
-      }
-      // 插话判定：模型真的在输出/干活才算；新轮次刚启动两者皆为否，
-      // 普通发消息不会误报。
-      const busy = state.toolActive > 0 || Date.now() - state.lastChunkAt < 2500
-      if (busy) state.surprisedUntil = Date.now() + cfg.surprised_ms
-      return
-    }
-    if (event.type === 'approval/asked') {
-      if (sid) adoptSession(sid)
-      state.approvalPending += 1
-      if (state.approvalPending === 1) state.approvalFirstAskedAt = Date.now()
-      if (sid) state.approvalSessionId = sid
-      const t = Date.now()
-      // 60 秒内第二次请求 → 5 秒求饶窗口；时间盒过期自动回落 fork，不会卡死。
-      if (t - state.lastAskedAt < cfg.begging_window_ms) state.beggingUntil = t + cfg.begging_show_ms
-      state.lastAskedAt = t
-      return
-    }
-    if (event.type === 'compaction/start') {
-      // 时间戳含 90 秒兜底：end 丢失也不会永久卡在压缩表情上。
-      state.compactingUntil = Date.now() + cfg.compacting_failsafe_ms
-      return
-    }
-    if (event.type === 'compaction/end' || event.type === 'compaction/summary' || event.type === 'compaction/prune') {
-      state.compactingUntil = 0
-      return
-    }
-    if (event.type === 'approval/decided') {
-      state.approvalPending = Math.max(0, state.approvalPending - 1)
-      if (state.approvalPending === 0) state.approvalFirstAskedAt = 0
-      const outcome = event.data && event.data.outcome
-      if (outcome === 'allowed-once' || outcome === 'rejected') {
-        state.lastApproval = outcome
-        state.lastApprovalAt = Date.now()
-        if (sid) state.approvalSessionId = sid
-      }
-      if (outcome === 'rejected') {
-        state.consecutiveRejects += 1
-        if (state.consecutiveRejects >= 2) {
-          state.turnFlash = 'fake-crying'
-          state.turnFlashAt = Date.now()
-          state.consecutiveRejects = 0
-        }
-      } else if (outcome === 'allowed-once') {
-        state.consecutiveRejects = 0
-      }
-      return
-    }
-    if (event.type === 'turn/start') {
-      state.turnStartedAt = Date.now()
-      return
-    }
-    if (event.type === 'turn/end') {
-      state.toolActive = 0
-      state.turnStartedAt = 0
-      // 轮次结束兜底：提问挂起与压缩态一并清除，避免跨轮阻塞。
-      state.askPending = false
-      state.askCallId = null
-      state.compactingUntil = 0
-      // 批准后的 hacker 在对话完成时结束；rejected 跨轮存活、只被打字消费。
-      if (sid && state.approvalSessionId === sid && state.lastApproval === 'allowed-once') {
-        state.lastApproval = null
-        state.approvalSessionId = null
-      }
-      // turn 结束即当前 session 不再 running：清 activeSessionId 与跨轮累计的拒绝数。
-      // adoptSession 的"切换结算"会先把 >=2 的拒绝打成 fake-crying 再清零。
-      if (sid && state.activeSessionId === sid) {
-        if (state.consecutiveRejects >= 2) {
-          state.turnFlash = 'fake-crying'
-          state.turnFlashAt = Date.now()
-        }
-        state.activeSessionId = null
-        state.consecutiveRejects = 0
-      }
-      const reason = event.data && event.data.reason
-      const kind = reason && reason.kind
-      if (kind === 'aborted') {
-        state.turnFlash = 'aborted'
-        state.turnFlashAt = Date.now()
-      } else if (kind === 'error' || kind === 'max-tokens') {
-        state.turnFlash = kind
-        state.turnFlashAt = Date.now()
-      } else if (kind === 'blocked') {
-        state.cryingUntil = Date.now() + cfg.crying_ms
-      } else if (kind === 'completed' && state.turnToolCalls >= 5) {
-        state.admirableUntil = Date.now() + cfg.admirable_ms
-      }
-      state.turnToolCalls = 0
-      return
-    }
-    }  // 关闭 inner handler
-    // 包装层：每次事件后 rev++（含 lastActivityAt 变更，client 必能观测到）
-    // P1.7：rev++ 后向所有 SSE 客户端广播 snapshot；中键菜单 / 工具卡片
-    // 控制台 / 设置页 都订阅同一流，状态变更立即同步，不再各自轮询
-    return ctx.on('session/event', (session, event) => {
-      inner(session, event)
-      state.rev += 1
-      if (sseClients.size > 0) sseBroadcast()
-    })
-  })
-
+  // ── F.3 snapshot ──
   const snapshot = () => {
     let phase = 'wait'
     if (state.toolActive > 0) phase = 'tool'
     else if (Date.now() - state.lastChunkAt < 2000) phase = 'stream'
-    // 'running' 由纯本地状态派生（事件 + 用户活动窗口），不再每帧扫描 agents
-    // 注册表；plugin 激活时由 apply 启动基线保证 activeSessionId 已就位。
     const running = state.toolActive > 0
       || state.turnStartedAt > 0
       || (state.userMessageAt > 0 && Date.now() - state.userMessageAt < USER_MESSAGE_RUN_MS)
@@ -396,29 +392,161 @@ export async function apply(ctx, config) {
       tired: state.turnStartedAt > 0 && Date.now() - state.turnStartedAt > TIRED_AFTER_MS,
       ignoredApproval: state.approvalPending > 0 && state.approvalFirstAskedAt > 0 && Date.now() - state.approvalFirstAskedAt > IGNORED_AFTER_MS,
       sleeping: Date.now() - state.lastActivityAt > SLEEP_AFTER_MS,
-      // 把阈值透传给 client，client 可派生自己需要的窗口（目前只取 turn_flash_ms）
       cfg: {
         turn_flash_ms: cfg.turn_flash_ms,
-        // P1.5：把 user_message_run_ms 透传,client 可派生自己的"刚启动"窗口判定
         user_message_run_ms: cfg.user_message_run_ms,
       },
       rev: state.rev,
     }
   }
 
+  // SSE 总线:rev++ 时广播,writeEvent 在 broadcast 内调用
+  const sseBus = buildSSEBus(snapshot)
+
+  // ── F.4 session/event 包装层 ──
+  ctx.effect(() => {
+    const inner = (session, event) => {
+      if (!event || typeof event.type !== 'string') return
+      state.lastActivityAt = Date.now()
+      const sid = sessionIdOf(session)
+      if (sid && state.activeSessionId === null) state.activeSessionId = sid
+
+      if (event.type === 'assistant/chunk') {
+        state.lastChunkAt = Date.now()
+        return
+      }
+      if (event.type === 'tool/call') {
+        if (sid) adoptSession(sid)
+        state.toolActive += 1
+        state.turnToolCalls += 1
+        if (state.turnStartedAt === 0) state.turnStartedAt = Date.now()
+        if (event.data && event.data.name === 'ask_user_question') {
+          state.askCallId = event.data.callId || null
+          state.askPending = true
+        }
+        return
+      }
+      if (event.type === 'tool/result') {
+        state.toolActive = Math.max(0, state.toolActive - 1)
+        const tid = event.data && event.data.message && event.data.message.toolCallId
+        if (state.askPending && tid && state.askCallId === tid) {
+          state.askPending = false
+          state.askCallId = null
+        }
+        return
+      }
+      if (event.type === 'user/message') {
+        if (sid) adoptSession(sid)
+        state.userMessageAt = Date.now()
+        if (state.askPending) {
+          state.askPending = false
+          state.askCallId = null
+          return
+        }
+        const busy = state.toolActive > 0 || Date.now() - state.lastChunkAt < 2500
+        if (busy) state.surprisedUntil = Date.now() + cfg.surprised_ms
+        return
+      }
+      if (event.type === 'approval/asked') {
+        if (sid) adoptSession(sid)
+        state.approvalPending += 1
+        if (state.approvalPending === 1) state.approvalFirstAskedAt = Date.now()
+        if (sid) state.approvalSessionId = sid
+        const t = Date.now()
+        if (t - state.lastAskedAt < cfg.begging_window_ms) state.beggingUntil = t + cfg.begging_show_ms
+        state.lastAskedAt = t
+        return
+      }
+      if (event.type === 'compaction/start') {
+        state.compactingUntil = Date.now() + cfg.compacting_failsafe_ms
+        return
+      }
+      if (event.type === 'compaction/end' || event.type === 'compaction/summary' || event.type === 'compaction/prune') {
+        state.compactingUntil = 0
+        return
+      }
+      if (event.type === 'approval/decided') {
+        state.approvalPending = Math.max(0, state.approvalPending - 1)
+        if (state.approvalPending === 0) state.approvalFirstAskedAt = 0
+        const outcome = event.data && event.data.outcome
+        if (outcome === 'allowed-once' || outcome === 'rejected') {
+          state.lastApproval = outcome
+          state.lastApprovalAt = Date.now()
+          if (sid) state.approvalSessionId = sid
+        }
+        if (outcome === 'rejected') {
+          state.consecutiveRejects += 1
+          if (state.consecutiveRejects >= 2) {
+            state.turnFlash = 'fake-crying'
+            state.turnFlashAt = Date.now()
+            state.consecutiveRejects = 0
+          }
+        } else if (outcome === 'allowed-once') {
+          state.consecutiveRejects = 0
+        }
+        return
+      }
+      if (event.type === 'turn/start') {
+        state.turnStartedAt = Date.now()
+        return
+      }
+      if (event.type === 'turn/end') {
+        state.toolActive = 0
+        state.turnStartedAt = 0
+        state.askPending = false
+        state.askCallId = null
+        state.compactingUntil = 0
+        if (sid && state.approvalSessionId === sid && state.lastApproval === 'allowed-once') {
+          state.lastApproval = null
+          state.approvalSessionId = null
+        }
+        if (sid && state.activeSessionId === sid) {
+          if (state.consecutiveRejects >= 2) {
+            state.turnFlash = 'fake-crying'
+            state.turnFlashAt = Date.now()
+          }
+          state.activeSessionId = null
+          state.consecutiveRejects = 0
+        }
+        const reason = event.data && event.data.reason
+        const kind = reason && reason.kind
+        if (kind === 'aborted') {
+          state.turnFlash = 'aborted'
+          state.turnFlashAt = Date.now()
+        } else if (kind === 'error' || kind === 'max-tokens') {
+          state.turnFlash = kind
+          state.turnFlashAt = Date.now()
+        } else if (kind === 'blocked') {
+          state.cryingUntil = Date.now() + cfg.crying_ms
+        } else if (kind === 'completed' && state.turnToolCalls >= 5) {
+          state.admirableUntil = Date.now() + cfg.admirable_ms
+        }
+        state.turnToolCalls = 0
+        return
+      }
+    }
+    // 包装层：每次事件后 rev++,P1.7 向 SSE 客户端广播
+    return ctx.on('session/event', (session, event) => {
+      inner(session, event)
+      state.rev += 1
+      if (!sseBus.isEmpty()) sseBus.broadcast()
+    })
+  })
+
+  // ── F.5 action 处理 ──
   const runAction = async (action, moodValue) => {
     switch (action) {
       case 'lock':
         if (moodValue === null || moodValue === undefined || moodValue === '') {
           if (state.locked !== null) state.rev += 1
           state.locked = null
-          if (sseClients.size > 0) sseBroadcast()
+          if (!sseBus.isEmpty()) sseBus.broadcast()
           return { ok: true, locked: null }
         }
         if (typeof moodValue === 'string' && lockable.has(moodValue)) {
           if (state.locked !== moodValue) state.rev += 1
           state.locked = moodValue
-          if (sseClients.size > 0) sseBroadcast()
+          if (!sseBus.isEmpty()) sseBus.broadcast()
           return { ok: true, locked: state.locked }
         }
         return { ok: false, message: 'unknown mood: ' + String(moodValue) }
@@ -439,7 +567,6 @@ export async function apply(ctx, config) {
           if (!pick) return { ok: false, message: '没有运行中的 agent——请在对话进行时点击' }
           // DSH approval.request() 现在要求 open turn 前置（user-approval@latest），
           // 拒绝发生在函数体头部，被包装成 rejected Promise：必须 await 才能拿到 message。
-          // 这里把异常 message 透回 UI，避免"已弹出"假提示。
           const outcome = await approval.request({
             agent: pick,
             toolName: 'taffy-test-approve',
@@ -447,7 +574,6 @@ export async function apply(ctx, config) {
           })
           return { ok: true, message: '测试审批卡片已弹出（outcome=' + String(outcome) + '），请到对话里处理' }
         } catch (error) {
-          // 把上游的可读错误透给 client：例如 "outside an open turn" 会原样回显
           return { ok: false, message: String(error?.message ?? error) }
         }
       }
@@ -456,150 +582,45 @@ export async function apply(ctx, config) {
     }
   }
 
-  const sendJson = (res, value) => {
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
-    res.end(JSON.stringify(value))
-  }
-
+  // ── F.6 路由注册 ──
   const disposeRoute = ctx.webServer.register({
     kind: 'prefix',
     path: ROUTE_BASE,
     handler: async (req, res) => {
       try {
         const url = new URL(req.url ?? '/', 'http://localhost')
-        // 兼容 prefix 路由是否带前缀两种回调形态。
+        // 兼容 prefix 路由是否带前缀两种回调形态
         let path = url.pathname
         if (path.startsWith(ROUTE_BASE)) path = path.slice(ROUTE_BASE.length) || '/'
-        if (path === '/api/state') {
-          sendJson(res, { ok: true, state: snapshot() })
-          return
-        }
-        if (path === '/api/events') {
-          // P1.7：Server-Sent Events 推流
-          // 连接时立即推送当前 snapshot，后续 rev++ 推增量。
-          // 同源 EventSource 自动带 cookie/Origin,通过 CORS 校验等同 loopback origin
-          // （webserver 的 Origin 头解析来自客户端发起端的页 origin）
-          const origin = req.headers && req.headers.origin
-          if (origin !== undefined && origin !== null) {
-            const okOrigin = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin)
-            if (!okOrigin) {
-              res.writeHead(403, { 'Content-Type': 'text/plain' })
-              res.end('origin not allowed')
-              return
-            }
-          }
-          res.writeHead(200, {
-            'Content-Type': 'text/event-stream; charset=utf-8',
-            'Cache-Control': 'no-cache, no-store',
-            'Connection': 'keep-alive',
-            // 防止 nginx 等代理缓冲
-            'X-Accel-Buffering': 'no',
-          })
-          // 立即推送 snapshot 作为首帧
-          sseWriteEvent(res, { type: 'state', state: snapshot() })
-          sseClients.add(res)
-          ensureSseHeartbeat()
-          // 客户端断开时清理 Set 与计时器
-          const onClose = () => {
-            if (!sseClients.has(res)) return
-            sseClients.delete(res)
-            maybeStopSseHeartbeat()
-            try { res.end() } catch { /* 已关闭 */ }
-          }
-          req.on('close', onClose)
-          req.on('aborted', onClose)
-          return
-        }
+
+        if (path === '/api/state') return handleState(res, snapshot)
+        if (path === '/api/events') return handleSSE(req, res, sseBus, snapshot)
         if (path === '/api/action') {
-          // CSRF 防护：写动作严格 POST-only + Origin 校验
-          const method = String(req.method || 'GET').toUpperCase()
-          if (method !== 'POST') {
-            res.writeHead(405, { 'Content-Type': 'text/plain', Allow: 'POST' })
-            res.end('method not allowed')
-            return
-          }
-          const origin = req.headers && req.headers.origin
-          // Origin 缺省（curl/扩展）放行；非缺省时必须匹配 loopback
-          if (origin !== undefined && origin !== null) {
-            const okOrigin = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin)
-            if (!okOrigin) {
-              res.writeHead(403, { 'Content-Type': 'text/plain' })
-              res.end('origin not allowed')
-              return
-            }
-          }
-          const result = await runAction(url.searchParams.get('action'), url.searchParams.get('mood'))
-          if (result === null) {
-            res.writeHead(404, { 'Content-Type': 'text/plain' })
-            res.end('unknown action')
-            return
-          }
-          sendJson(res, result)
+          const result = await handleAction(req, url, runAction)
+          if (result.json !== undefined) sendJson(res, result.json)
+          else sendText(res, result.status, result.text, result.allow ? { Allow: result.allow } : {})
           return
         }
+        if (path === '/api/asset-index') return handleAssetIndex(res, assetHashes)
+
         const assetPrefix = '/assets/'
         if (path.startsWith(assetPrefix)) {
-          const requestName = decodeURIComponent(path.slice(assetPrefix.length).split('?')[0])
-          // 形式 1：带哈希的 URL /assets/<base>.<hash>.<ext>
-          //   base 含 .jpg/.gif 前的全部点也算进去（用 lastIndexOf 切第二段为 hash）
-          const dotExt = requestName.lastIndexOf('.')
-          if (dotExt > 0) {
-            const beforeExt = requestName.slice(0, dotExt)
-            const ext = requestName.slice(dotExt)
-            const dotHash = beforeExt.lastIndexOf('.')
-            if (dotHash > 0) {
-              const baseName = beforeExt.slice(0, dotHash) + ext
-              const hash = beforeExt.slice(dotHash + 1)
-              if (ASSET_TYPES.has(baseName) && /^[0-9a-f]{8}$/.test(hash)) {
-                // P1.6：按需 readFile + LRU 缓存（命中重复请求不再读盘）
-                const file = join(ASSETS_DIR, baseName)
-                const bytes = await cachedRead(hash, file)
-                if (bytes) {
-                  res.writeHead(200, {
-                    'Content-Type': ASSET_TYPES.get(baseName),
-                    'Cache-Control': 'public, max-age=31536000, immutable',
-                    'Content-Length': String(bytes.length),
-                  })
-                  res.end(bytes)
-                  return
-                }
-              }
-            }
+          const result = await handleAsset(path, assetHashes, hashedUrl, cachedRead)
+          if (result.body !== undefined) {
+            res.writeHead(result.status, result.headers)
+            res.end(result.body)
+          } else if (result.location !== undefined) {
+            res.writeHead(result.status, { Location: result.location, 'Cache-Control': result.cacheControl })
+            res.end()
+          } else {
+            sendText(res, result.status, result.text)
           }
-          // 形式 2：老的无哈希 URL → 301 跳转到带哈希 URL（永久）
-          if (ASSET_TYPES.has(requestName)) {
-            const target = hashedUrl(requestName)
-            if (target) {
-              res.writeHead(301, {
-                Location: target,
-                'Cache-Control': 'public, max-age=300',
-              })
-              res.end()
-              return
-            }
-          }
-          res.writeHead(404, { 'Content-Type': 'text/plain' })
-          res.end('not found')
           return
         }
-        if (path === '/api/asset-index') {
-          // 启动时算好的 {name: hash} 映射表；client 拉一次拼 GIFS url
-          const idx = {}
-          for (const [name, h] of assetHashes) {
-            const dot = name.lastIndexOf('.')
-            const base = dot > 0 ? name.slice(0, dot) : name
-            const ext = dot > 0 ? name.slice(dot) : ''
-            idx[name] = base + '.' + h + ext
-          }
-          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
-          res.end(JSON.stringify(idx))
-          return
-        }
-        res.writeHead(404, { 'Content-Type': 'text/plain' })
-        res.end('not found')
+
+        sendText(res, 404, 'not found')
       } catch (error) {
-        res.writeHead(500, { 'Content-Type': 'text/plain' })
-        res.end(String(error?.message ?? error))
+        sendText(res, 500, String(error?.message ?? error))
       }
     },
   })
