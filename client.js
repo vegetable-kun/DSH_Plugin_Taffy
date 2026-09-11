@@ -372,10 +372,13 @@ window.__ModuleLoader__.load({
     // ════════════════════════════════════════════════════════════════════
 
     // buildTypingObserver: 监听 composer.dock 的 input.draft,消费 rejected
+    // 新 DSH 的 conversation.composer.dock slot props 已不含 input,用 optional chaining 防御
     var buildTypingObserver = function (mood, publish) {
       return function (props) {
         React.useEffect(function () {
-          var typing = typeof props.input.draft === 'string' && props.input.draft.length > 0
+          var input = props.input
+          if (!input) return  // 新 DSH 无 input prop,跳过打字检测
+          var typing = typeof input.draft === 'string' && input.draft.length > 0
           if (typing !== mood.typing) {
             var wasTyping = mood.typing
             mood.typing = typing
@@ -391,7 +394,7 @@ window.__ModuleLoader__.load({
     }
 
     // buildGifOverlay: shell.overlay — 浮动 GIF + 拖拽 + 中键菜单 + time-driven wakeup
-    var buildGifOverlay = function (sseBus) {
+    var buildGifOverlay = function (sseBus, mood, publish, scheduleSave) {
       return function (props) {
         var hostState0 = { rev: -1, running: false, phase: 'wait', approvalPending: false, lastApproval: null, lastApprovalAt: 0, turnFlash: null, turnFlashAt: 0, locked: null, surprisedUntil: 0, cryingUntil: 0, admirableUntil: 0, waitingAnswer: false, beggingUntil: 0, compacting: false, tired: false, ignoredApproval: false, sleeping: false }
         var hostStateTuple = React.useState(hostState0)
@@ -734,7 +737,7 @@ window.__ModuleLoader__.load({
     }
 
     // buildToolConsole: tool.view.cordis — 工具卡片控制台,与浮动菜单共用 SSE 流
-    var buildToolConsole = function (sseBus) {
+    var buildToolConsole = function (sseBus, mood, publish, scheduleSave) {
       return function () {
         var stTuple = React.useState({ running: false, phase: 'wait', approvalPending: false, locked: null, waitingAnswer: false, compacting: false, tired: false, ignoredApproval: false, sleeping: false })
         var st = stTuple[0]
@@ -850,7 +853,7 @@ window.__ModuleLoader__.load({
       slots.inject('shell.overlay', function () {
         return slots.register(
           { name: 'shell.overlay', id: 'taffy-gif' },
-          buildGifOverlay(sseBus)
+          buildGifOverlay(sseBus, moodState.mood, moodState.publish, moodState.scheduleSave)
         )
       })
 
@@ -871,7 +874,7 @@ window.__ModuleLoader__.load({
       slots.inject('tool.view.cordis', function () {
         return slots.register(
           { name: 'tool.view.cordis', key: 'self' },
-          buildToolConsole(sseBus)
+          buildToolConsole(sseBus, moodState.mood, moodState.publish, moodState.scheduleSave)
         )
       })
 
